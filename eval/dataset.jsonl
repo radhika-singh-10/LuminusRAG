@@ -1,0 +1,9 @@
+{"id": "stages", "question": "What are the pipeline stages of RAG?", "reference": "Load, split, embed, store, retrieve, and generate.", "must_include": ["load", "split", "embed", "store", "retrieve", "generate"], "evidence": ["1. Load: read PDFs", "6. Generate: prompt the LLM"]}
+{"id": "embed_dims", "question": "How many dimensions does the all-MiniLM-L6-v2 embedding model produce?", "reference": "all-MiniLM-L6-v2 produces 384-dimensional embeddings.", "must_include": ["384"], "evidence": ["384-dimensional embeddings"]}
+{"id": "chunk_size", "question": "What example chunk size and overlap are given for splitting documents?", "reference": "1000 characters with 150 characters of overlap.", "must_include": ["1000", "150"], "evidence": ["1000 characters"]}
+{"id": "vector_db", "question": "Which database is mentioned for persisting vectors?", "reference": "Chroma.", "must_include": ["chroma"], "evidence": ["such as Chroma"]}
+{"id": "rag_def", "question": "What does RAG combine?", "reference": "RAG combines a retriever with a language model.", "must_include": ["retriever", "language model"], "evidence": ["combines a retriever with a language model"]}
+{"id": "overlap_failure", "question": "What can happen if chunks have no overlap?", "reference": "Missing overlap can split an answer across two chunks.", "must_include": ["two chunks"], "evidence": ["Missing overlap can split an answer"]}
+{"id": "hallucination_cause", "question": "Why might a model hallucinate in a RAG system?", "reference": "Without an answer only from context instruction, models may hallucinate.", "must_include": ["context"], "evidence": ["models may hallucinate"]}
+{"id": "unans_reranker", "question": "Which reranker model does the system use?", "answerable": false}
+{"id": "unans_price", "question": "How much does it cost per month to run this RAG system in production?", "answerable": false}

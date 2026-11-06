@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project
+.venv/
+chroma_db/
+data/uploads/
+eval/results/

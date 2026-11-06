@@ -1,0 +1,10 @@
+{
+  "defaults": {"n": 5, "ks": [1, 3, 5], "temperature": 0.7},
+  "variants": [
+    {"name": "greedy", "n": 1, "ks": [1], "temperature": 0.0},
+    {"name": "baseline"},
+    {"name": "top2", "top_k": 2},
+    {"name": "mmr", "SEARCH_TYPE": "mmr"},
+    {"name": "qwen-3b", "HF_LLM_MODEL": "Qwen/Qwen2.5-3B-Instruct"}
+  ]
+}
