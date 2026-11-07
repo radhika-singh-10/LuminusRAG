@@ -6,7 +6,25 @@ from pathlib import Path
 from rag import config
 
 
-def print_result(result: dict) -> None:
+def stream_answer(chain, question: str) -> dict:
+    """Print status lines and the answer as it streams; return the final result."""
+    result, streaming = None, False
+    for event in chain.events(question):
+        if event["type"] == "status" and sys.stdout.isatty():
+            print(f"\r\033[2K  … {event['message']}", end="", flush=True)
+        elif event["type"] == "token":
+            if not streaming:
+                print("\r\033[2K" if sys.stdout.isatty() else "", end="")
+                print()
+                streaming = True
+            print(event["text"], end="", flush=True)
+        elif event["type"] == "final":
+            result = event["result"]
+    print("\n")
+    return result
+
+
+def print_result(result: dict, answer_shown: bool = False) -> None:
     intent = result.get("intent")
     tags = []
     if intent:
@@ -21,9 +39,10 @@ def print_result(result: dict) -> None:
         print(f"[web search failed: {result['web_error']}]")
     if result.get("stored"):
         print(f"[saved {result['stored']} web passages to the knowledge base]")
-    print(f"\n{result['answer']}\n")
-    if intent and intent.error:
-        print(f"Intent error: {intent.error}\n", file=sys.stderr)
+    if not answer_shown:
+        print(f"\n{result['answer']}\n")
+    if intent and intent.error and intent.category in ("error", "guard_error"):
+        print(f"[check failed: {intent.error}]\n", file=sys.stderr)
     if not result["context"]:
         return
     print("Sources:")
@@ -181,7 +200,7 @@ def main() -> int:
     chain = build_guarded_chain()
 
     if args.cmd == "ask":
-        print_result(chain.invoke(args.question))
+        print_result(stream_answer(chain, args.question), answer_shown=True)
         return 0
 
     from rag.history import add_exchange, new_chat_id, redact_question
@@ -196,8 +215,8 @@ def main() -> int:
             return 0
         if q.lower() in {"exit", "quit", ""}:
             return 0
-        result = chain.invoke(q)
-        print_result(result)
+        result = stream_answer(chain, q)
+        print_result(result, answer_shown=True)
         add_exchange(chat_id, redact_question(q), result["answer"])
 
 

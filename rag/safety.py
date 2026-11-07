@@ -72,7 +72,8 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
             if not _valid(det, m.group()):
                 return m.group()
             found.append(det["kind"])
-            return f"[REDACTED_{det['kind'].upper()}]"
+            value = m.group()
+            return f"[REDACTED_{det['kind'].upper()}]" + value[len(value.rstrip()):]  # keep trailing space
 
         text = det["_compiled"].sub(sub, text)
     return text, sorted(set(found))

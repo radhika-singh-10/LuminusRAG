@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from . import config
 from .safety import (
     detect_pii, find_command, injection_rule, load_policy, redact_pii, strip_hidden_content,
+    strip_redactions,
 )
 
 POLICIES = ("prompt_injection", "pii")
@@ -203,11 +204,14 @@ def check_query(text: str, use_llm: bool | None = None) -> GuardResult:
     # 2. Redact low-risk contact details (rule action "redact").
     redacted_text, redacted = redact_pii(text)
 
-    # 3. LLM judgment against each policy.
+    # 3. LLM judgment against each policy. The judge sees the question without
+    #    the redacted contact details (already handled), so a placeholder such as
+    #    [REDACTED_EMAIL] doesn't make an ordinary question look like a PII request.
     if use_llm:
+        judged = strip_redactions(redacted_text) if redacted else redacted_text
         for name in POLICIES:
             try:
-                v = llm_check(redacted_text, name, "query")
+                v = llm_check(judged or redacted_text, name, "query")
             except Exception as e:  # Ollama down, bad output: fail closed
                 return GuardResult(False, name, None, None, f"{type(e).__name__}: {e}", "error")
             if v.verdict == "unsafe":

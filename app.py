@@ -277,15 +277,29 @@ with tab_ask:
             with st.chat_message("user"):
                 st.markdown(question)
             with st.chat_message("assistant"):
-                with st.spinner("Checking intent, then retrieving and generating…"):
-                    # Built per question so the retriever sees freshly indexed files.
-                    result = build_guarded_chain(cached_llm()).invoke(question)
+                # Built per question so the retriever sees freshly indexed files.
+                pipeline = build_guarded_chain(cached_llm())
+                status_line = st.empty()
+                final: dict = {}
+
+                def answer_tokens():
+                    for event in pipeline.events(question):
+                        if event["type"] == "status":
+                            status_line.caption(f"⏳ {event['message']}")
+                        elif event["type"] == "token":
+                            status_line.empty()
+                            yield event["text"]  # already sanitized, segment by segment
+                        elif event["type"] == "final":
+                            final.update(event["result"])
+
+                st.write_stream(answer_tokens())
+                status_line.empty()
+                result = final
                 sources = [
                     {"label": source_label(d.metadata), "text": d.page_content}
                     for d in result["context"]
                 ]
                 intent = result.get("intent")
-                st.markdown(result["answer"])
                 meta_line = answer_meta(result)
                 if meta_line:
                     st.caption(meta_line)

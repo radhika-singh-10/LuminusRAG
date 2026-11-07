@@ -1,4 +1,5 @@
 """Retrieval-augmented generation chain (LCEL) with source citations."""
+import re
 from functools import lru_cache
 
 from langchain_core.documents import Document
@@ -115,9 +116,16 @@ def _best_score(question: str, docs: list[Document]) -> float:
     return float((d @ q).max())
 
 
-def build_guarded_chain(llm: BaseChatModel | None = None) -> Runnable:
+# Streaming emits text one sentence or line at a time, each sanitized before it
+# is shown, so PII, secrets, images and unknown links never reach the screen.
+# Boundaries are whitespace after sentence punctuation, or a newline; emails,
+# card numbers and URLs contain no such boundary, so they are never split.
+_SEGMENT_END = re.compile(r"(?<=[.!?:;])[ \t]+|\n")
+
+
+class GuardedPipeline:
     """Full pipeline: policy guard -> intent gate -> local store -> web (-> store)
-    -> output sanitizer.
+    -> output sanitizer, with streaming.
 
     1. Policy guard (rag/policy.py): the question is checked against
        policies/prompt_injection.json and policies/pii.json, first by their
@@ -130,43 +138,99 @@ def build_guarded_chain(llm: BaseChatModel | None = None) -> Runnable:
        answer from it; a real answer (not "I don't know") is returned.
     4. Web: otherwise search the web with the redacted question, answer from
        cleaned passages, and save them into Chroma when they gave an answer.
-
-    5. Output: every answer is sanitized (PII redacted, images and links to
-       unknown hosts removed) before it is returned or saved.
+    5. Output: answers are sanitized (PII redacted, images and links to
+       unknown hosts removed) segment by segment as they stream.
 
     The pipeline never executes anything: the LLMs have no tools, and model or
     web output is only displayed or stored as text.
 
+    events(question) yields:
+      {"type": "status", "stage": ..., "message": ...}
+      {"type": "token", "text": ...}        sanitized answer text, in order
+      {"type": "final", "result": {...}}    same dict invoke() returns
     Result keys: question, context, answer, intent, origin ("local" | "web" |
-    "none" | None if blocked), local_score, pii_redacted, stored, web_stats.
+    "none" | None if blocked), local_score, pii_redacted, stored, guard,
+    output_actions, web_stats / web_error.
     """
-    from .eval.metrics import is_refusal
-    from .intent import Intent
-    from .policy import check_query
-    from .safety import sanitize_output, strip_redactions
-    from .web import store_web_documents, web_documents
 
-    llm = llm or get_llm()
-    retriever = get_retriever()
-    answer_chain = build_answer_chain(llm)
+    def __init__(self, llm: BaseChatModel | None = None):
+        self.llm = llm or get_llm()
+        self.retriever = get_retriever()
+        self.answer_chain = build_answer_chain(self.llm)
 
-    def blocked(question: str, intent, pii: list[str], guard=None) -> dict:
-        return {"question": question, "context": [], "answer": intent.message, "intent": intent,
-                "origin": None, "local_score": None, "pii_redacted": pii, "stored": 0,
-                "guard": guard}
+    # ----- public API -----
 
-    def finish(result: dict, docs: list, answer: str, origin: str) -> dict:
+    def invoke(self, question: str) -> dict:
+        for event in self.events(question):
+            if event["type"] == "final":
+                return event["result"]
+        raise RuntimeError("pipeline ended without a result")
+
+    def stream(self, question: str):
+        """Yield only the answer text; the final result is available afterwards
+        as self.last_result. Convenient for st.write_stream and CLIs."""
+        self.last_result = None
+        for event in self.events(question):
+            if event["type"] == "token":
+                yield event["text"]
+            elif event["type"] == "final":
+                self.last_result = event["result"]
+
+    # ----- internals -----
+
+    def _stream_answer(self, docs: list, question: str, stop_on_refusal: bool):
+        """Stream a sanitized answer. Yields token events and returns
+        (answer, actions, refused_early)."""
+        from .eval.metrics import is_refusal
+        from .safety import sanitize_output
+
         urls = {d.metadata.get("source", "") for d in docs if d.metadata.get("origin") == "web"}
-        answer, actions = sanitize_output(answer, urls)
-        return {**result, "context": docs, "answer": answer, "origin": origin,
-                "output_actions": actions}
+        buffer, parts, actions, first = "", [], set(), True
+        for chunk in self.answer_chain.stream({"context": docs, "question": question}):
+            buffer += chunk
+            cut = None
+            for m in _SEGMENT_END.finditer(buffer):
+                cut = m.end()
+            if cut is None:
+                continue
+            segment, buffer = buffer[:cut], buffer[cut:]
+            if first and stop_on_refusal and is_refusal(segment):
+                return "", [], True  # don't show "I don't know"; try the web instead
+            first = False
+            clean, acts = sanitize_output(segment, urls)
+            actions.update(acts)
+            parts.append(clean)
+            yield {"type": "token", "text": clean}
+        if buffer:
+            if first and stop_on_refusal and is_refusal(buffer):
+                return "", [], True
+            clean, acts = sanitize_output(buffer, urls)
+            actions.update(acts)
+            parts.append(clean)
+            yield {"type": "token", "text": clean}
+        return "".join(parts).strip(), sorted(actions), False
 
-    def run(question: str) -> dict:
+    def events(self, question: str):
+        from .eval.metrics import is_refusal
+        from .intent import Intent
+        from .policy import check_query
+        from .safety import strip_redactions
+        from .web import store_web_documents, web_documents
+
+        def blocked(q: str, intent, pii: list[str], guard=None):
+            result = {"question": q, "context": [], "answer": intent.message, "intent": intent,
+                      "origin": None, "local_score": None, "pii_redacted": pii, "stored": 0,
+                      "guard": guard, "output_actions": []}
+            yield {"type": "token", "text": intent.message}
+            yield {"type": "final", "result": result}
+
+        yield {"type": "status", "stage": "guard", "message": "Checking safety policies…"}
         guard = check_query(question)
         if not guard.safe:
             category = "guard_error" if guard.source == "error" else "blocked_policy"
-            redacted_q = strip_redactions(guard.text) if guard.text else "[question withheld]"
-            return blocked(redacted_q, Intent(category, False, guard.message, guard.reason), [], guard)
+            q = strip_redactions(guard.text) if guard.text else "[question withheld]"
+            yield from blocked(q, Intent(category, False, guard.message, guard.reason), [], guard)
+            return
 
         question, pii = guard.text, guard.redacted
         if pii:  # the placeholders carry no meaning; drop them for search and answering
@@ -174,28 +238,38 @@ def build_guarded_chain(llm: BaseChatModel | None = None) -> Runnable:
 
         intent = None
         if config.INTENT_ENABLED:
+            yield {"type": "status", "stage": "intent", "message": "Checking the question is about AI…"}
             intent = classify_intent(question)
             if not intent.allowed:
-                return blocked(question, intent, pii)
+                yield from blocked(question, intent, pii, guard)
+                return
 
-        docs = retriever.invoke(question)
+        yield {"type": "status", "stage": "retrieve", "message": "Searching your documents…"}
+        docs = self.retriever.invoke(question)
         score = _best_score(question, docs)
         result = {"question": question, "intent": intent, "local_score": score,
                   "pii_redacted": pii, "stored": 0, "guard": guard}
 
         if docs and (score >= config.WEB_MIN_SCORE or not config.WEB_FALLBACK):
-            answer = answer_chain.invoke({"context": docs, "question": question})
-            if not (config.WEB_FALLBACK and is_refusal(answer)):
-                return finish(result, docs, answer, "local")
+            yield {"type": "status", "stage": "generate", "message": "Answering from your documents…"}
+            answer, actions, refused = yield from self._stream_answer(
+                docs, question, stop_on_refusal=config.WEB_FALLBACK)
+            if not refused:
+                yield {"type": "final", "result": {**result, "context": docs, "answer": answer,
+                                                   "origin": "local", "output_actions": actions}}
+                return
 
         if config.WEB_FALLBACK:
+            yield {"type": "status", "stage": "web_search",
+                   "message": "Not in your documents. Searching the web…"}
             web_docs = []
             try:
                 web_docs, result["web_stats"] = web_documents(question)
             except Exception as e:  # rate limit, network down, ...
                 result["web_error"] = f"{type(e).__name__}: {e}"
             if web_docs:
-                answer = answer_chain.invoke({"context": web_docs, "question": question})
+                yield {"type": "status", "stage": "web_generate", "message": "Answering from web sources…"}
+                answer, actions, _ = yield from self._stream_answer(web_docs, question, False)
                 if config.WEB_STORE and not is_refusal(answer):
                     try:
                         on_topic = [d for d in web_docs
@@ -203,9 +277,17 @@ def build_guarded_chain(llm: BaseChatModel | None = None) -> Runnable:
                         result["stored"] = store_web_documents(on_topic, question)
                     except Exception as e:
                         result["store_error"] = f"{type(e).__name__}: {e}"
-                return finish(result, web_docs, answer, "web")
+                yield {"type": "final", "result": {**result, "context": web_docs, "answer": answer,
+                                                   "origin": "web", "output_actions": actions}}
+                return
             result.setdefault("web_error", "web search returned no usable results")
 
-        return {**result, "context": [], "answer": REFUSAL, "origin": "none"}
+        yield {"type": "token", "text": REFUSAL}
+        yield {"type": "final", "result": {**result, "context": [], "answer": REFUSAL,
+                                           "origin": "none", "output_actions": []}}
 
-    return RunnableLambda(run)
+
+def build_guarded_chain(llm: BaseChatModel | None = None) -> GuardedPipeline:
+    """The full guarded pipeline. Use .invoke(question) or .events(question) /
+    .stream(question) for streaming."""
+    return GuardedPipeline(llm)

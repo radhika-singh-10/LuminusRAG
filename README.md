@@ -191,6 +191,22 @@ Ingestion is incremental: chunk ids derive from each file's content hash, so
 unchanged files are skipped, edited files are re-embedded, and deleted files
 are removed from the index.
 
+## Streaming
+
+Answers stream in the web UI and in `ask` / `chat`. While the checks run, a
+status line shows each stage (safety policies, AI-topic check, document
+search, web search); then the answer appears as it is generated.
+
+Streaming never bypasses the output sanitizer. Tokens are buffered into whole
+sentences or lines, and each piece is sanitized (PII and secrets redacted,
+images and unknown links removed) before it is shown, so raw model output
+never reaches the screen. If the first sentence of a local answer is "I don't
+know", it is not shown: generation stops and the web answer streams instead.
+
+In code, `build_guarded_chain()` returns a `GuardedPipeline` with
+`.invoke(question)` (final result), `.events(question)` (status, token, and
+final events), and `.stream(question)` (answer text only).
+
 ## Chat history and summaries
 
 Chats are stored with LangChain's `SQLChatMessageHistory`: each chat is a
