@@ -29,6 +29,19 @@ GRAPH_ENABLED = os.getenv("GRAPH_ENABLED", "true").lower() == "true"  # keep gra
 GRAPH_MODEL = os.getenv("GRAPH_MODEL", os.getenv("INTENT_MODEL", "llama3.2:3b"))
 GRAPH_K = int(os.getenv("GRAPH_K", "2"))  # extra chunks contributed by the graph
 
+# Reranking: fetch more candidates, keep the TOP_K a cross-encoder scores best
+RERANK = os.getenv("RERANK", "false").lower() == "true"
+RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+RERANK_FETCH_K = int(os.getenv("RERANK_FETCH_K", "20"))
+
+# History-aware retrieval: rewrite follow-ups into standalone questions
+HISTORY_AWARE = os.getenv("HISTORY_AWARE", "true").lower() == "true"
+HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "3"))  # previous Q&A pairs used
+
+# LLM-as-judge correctness (in addition to rule-based and NLI checks)
+LLM_JUDGE = os.getenv("LLM_JUDGE", "false").lower() == "true"
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", os.getenv("INTENT_MODEL", "llama3.2:3b"))
+
 # Intent gate (Ollama): only AI-related questions reach retrieval
 INTENT_ENABLED = os.getenv("INTENT_ENABLED", "true").lower() == "true"
 INTENT_MODEL = os.getenv("INTENT_MODEL", "llama3.2:3b")

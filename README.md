@@ -123,6 +123,8 @@ LuminusRAG/
 │   ├── safety.py        # PII detectors, injection rules, output sanitizer
 │   ├── history.py       # chat history (LangChain SQL store) + summaries
 │   ├── graph.py         # GraphRAG: entity/relation extraction, graph store, hybrid retriever
+│   ├── rerank.py        # cross-encoder reranking
+│   ├── followup.py      # history-aware rewriting of follow-up questions
 │   ├── chain.py         # retriever + prompt + LLM (LCEL)
 │   └── eval/
 │       ├── dataset.py   # JSONL eval set loader
@@ -130,6 +132,7 @@ LuminusRAG/
 │       ├── truthfulness.py  # NLI faithfulness / contradiction
 │       ├── intent_eval.py   # intent gate accuracy
 │       ├── guard_eval.py    # policy guard on labeled attack / benign questions
+│       ├── llm_judge.py     # LLM-as-judge correctness + agreement / kappa
 │       ├── security_eval.py # full-pipeline PII + prompt-injection eval
 │       ├── runner.py    # single eval run -> report
 │       └── harness.py   # multi-variant experiments + comparison table
@@ -231,6 +234,43 @@ Hybrid is the default: on 10 relational questions it raised accuracy from
 the original 21 questions it was on par (0.71 vs 0.73) with fewer
 hallucinations. Graph-only retrieval was worse (0.60), because chunks the
 graph did not capture are missed. See [results.md](results.md).
+
+## Reranking
+
+With `RERANK=true`, the retriever (vector, graph or hybrid) fetches
+`RERANK_FETCH_K` candidates (default 20) and a cross-encoder
+(`cross-encoder/ms-marco-MiniLM-L-6-v2`) scores each question-passage pair
+together; the best `TOP_K` are kept. Knowledge-graph fact summaries are not
+reranked and are always kept. It is off by default: in our benchmark it
+raised MRR from 0.79 to 0.97 but did not improve accuracy, lowered it on
+relational questions (0.77 to 0.63, because multi-hop answers need more than
+the top 4 chunks), and added about 35% latency. Compare it with
+`python main.py bench --config eval/experiments_extensions.json`.
+
+## Follow-up questions (history-aware retrieval)
+
+In a chat, follow-ups such as "What is its main cost?" are rewritten into a
+standalone question ("What is the main cost of HNSW?") before the intent
+check and retrieval, using LangChain's history-aware retriever pattern and the
+local Ollama model. Only questions that look like follow-ups (pronouns, "what
+about", "the two") are rewritten; standalone questions pass through
+unchanged. The rewrite must pass the regex policy rules, and the UI shows
+what the question was read as. History comes from the stored, PII-redacted
+chat. On the 10 follow-ups in `eval/followup_dataset.jsonl` it raised accuracy
+from 0.40 to 0.83 and retrieval recall from 0.70 to 1.00.
+
+## LLM-as-judge
+
+With `LLM_JUDGE=true`, `eval` and `bench` also ask a local judge model to
+grade each answer against the reference (correct or incorrect, score 1-5),
+next to the rule-based correctness and the NLI truthfulness metrics. Because
+small judges have known biases, the report includes the judge's agreement
+with the rule-based grade and Cohen's kappa, so you can see how far to trust
+it. On the main question set it agreed with the rules 87-92% of the time
+(kappa 0.65-0.80); on smaller sets agreement was much lower, so the
+rule-based grade stays primary. Refusals are graded by rule, and the judge
+replies in a plain two-line format because JSON output made the 3B model
+reject correct paraphrases.
 
 ## Streaming
 
@@ -386,6 +426,9 @@ Each run writes `per_question.jsonl` and `summary.json` under `eval/results/`.
 | `TOP_K` / `SEARCH_TYPE` | `4` / `similarity` (or `mmr`) |
 | `RETRIEVAL_MODE` / `GRAPH_K` | `hybrid` (or `vector`, `graph`) / `2` |
 | `GRAPH_ENABLED` / `GRAPH_MODEL` | `true` / `llama3.2:3b` |
+| `RERANK` / `RERANK_FETCH_K` / `RERANK_MODEL` | `false` / `20` / `cross-encoder/ms-marco-MiniLM-L-6-v2` |
+| `HISTORY_AWARE` / `HISTORY_TURNS` | `true` / `3` |
+| `LLM_JUDGE` / `JUDGE_MODEL` | `false` / `llama3.2:3b` |
 | `INTENT_ENABLED` / `INTENT_MODEL` | `true` / `llama3.2:3b` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` |
 | `WEB_FALLBACK` / `WEB_MIN_SCORE` | `true` / `0.25` |
@@ -493,6 +536,6 @@ answer but isn't consistent.
 
 ## Ideas to extend
 
-- Add a reranker and compare it with `bench`.
-- Add chat history with a history-aware retriever.
-- Add an LLM-as-judge correctness check alongside the NLI metrics.
+- Use a larger local model (for example Qwen2.5-7B) for graph extraction and judging.
+- Add OCR so scanned PDFs can be indexed.
+- Per-user document scoping with a tenant field filtered at query time.

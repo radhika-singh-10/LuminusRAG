@@ -238,3 +238,35 @@ or documents (for example the embedding model in one document and its vector siz
   extractor also makes some wrong relations (for example `RLHF --developed_by--> Google`).
   Hybrid is now the default (`RETRIEVAL_MODE=hybrid`).
 
+## Reranking, follow-up questions, and LLM-as-judge (`bench --config eval/experiments_extensions.json`)
+
+Run on 2026-11-07 with hybrid retrieval, 3 sampled answers per question, and the LLM judge
+(`llama3.2:3b`) grading every answer next to the rule-based correctness.
+
+| Setup | Accuracy | pass@3 | pass^3 | Retrieval R | MRR | Faithfulness | Judge accuracy | Judge vs rules (kappa) | Time |
+|---|---|---|---|---|---|---|---|---|---|
+| Original 21, hybrid | 0.698 | 0.810 | 0.571 | 1.000 | 0.789 | 0.883 | 0.746 | 0.92 agree (0.80) | 49 s |
+| Original 21, + reranker | 0.714 | 0.857 | 0.524 | 1.000 | **0.971** | 0.889 | 0.810 | 0.87 agree (0.65) | 66 s |
+| Relational 10, hybrid | **0.767** | 0.900 | **0.700** | 1.000 | 0.900 | 0.517 | 0.800 | 0.77 agree (0.31) | 36 s |
+| Relational 10, + reranker | 0.633 | 0.700 | 0.500 | 1.000 | 1.000 | 0.567 | 0.867 | 0.57 agree (-0.08) | 39 s |
+| Follow-ups 10, no history | 0.400 | 0.500 | 0.300 | 0.700 | 0.600 | 0.704 | 0.433 | 0.97 agree (0.93) | – |
+| Follow-ups 10, **history-aware** | **0.833** | **0.900** | **0.700** | **1.000** | **0.933** | 0.788 | 0.700 | 0.73 agree (0.27) | 29 s |
+
+- **History-aware follow-ups help the most:** rewriting "What is its main cost?" into "What is the main
+  cost of HNSW?" more than doubles accuracy (0.40 to 0.83) and lifts retrieval recall from 0.70 to 1.00.
+  It is on by default (`HISTORY_AWARE=true`).
+- **The reranker ranks better but does not answer better:** MRR rises from 0.79 to 0.97, so the
+  best chunk is almost always first, but accuracy is flat on ordinary questions and drops on
+  relational ones (0.77 to 0.63) because keeping only the top 4 of 20 candidates drops the second
+  chunk a multi-hop answer needs. It also adds about 35% latency. It stays off by default
+  (`RERANK=false`).
+- **The LLM judge is a usable second opinion on the main set:** it agrees with the rule-based grade on
+  87-92% of answers (Cohen's kappa 0.65-0.80, substantial). On the 10-question sets agreement is
+  much lower (kappa about 0.3 or below) and the judge is usually more lenient than the rules, which
+  require exact key phrases. Without human labels it is unclear which is closer to the truth, so
+  the rule-based grade remains the primary metric and the judge is off by default (`LLM_JUDGE=false`).
+- **Judge design notes:** with JSON-structured output the 3B judge rejected correct paraphrases and
+  always scored 1, and it accepted "I don't know" as correct; a plain two-line VERDICT/SCORE reply
+  scored 8/8 on a labeled sanity set, and refusals are graded by rule.
+- **Caveats:** 10-21 questions x 3 samples, so differences of a few points are noise.
+

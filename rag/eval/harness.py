@@ -36,6 +36,8 @@ COLUMNS = [
     ("faithful", lambda s: s["truthfulness"]["faithfulness"]),
     ("halluc", lambda s: s["truthfulness"]["hallucination_rate"]),
     ("abst_F1", lambda s: s["abstention"]["f1"]),
+    ("judge", lambda s: (s.get("llm_judge") or {}).get("judge_accuracy")),
+    ("kappa", lambda s: (s.get("llm_judge") or {}).get("cohen_kappa")),
     ("secs", lambda s: s["config"]["seconds"]),
 ]
 

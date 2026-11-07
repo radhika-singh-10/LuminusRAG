@@ -24,6 +24,10 @@ def judge(item: EvalItem, answer: str, contexts: list[str], nli) -> dict:
     if not item.answerable:
         out["correct"] = refused
         out["hallucinated"] = not refused
+        if config.LLM_JUDGE:
+            from .llm_judge import judge_answer
+
+            out.update(judge_answer(item.question, "", answer, answerable=False))
         return out
 
     p, r, f1 = M.token_prf(answer, item.reference) if item.reference else (0.0, 0.0, 0.0)
@@ -32,6 +36,11 @@ def judge(item: EvalItem, answer: str, contexts: list[str], nli) -> dict:
     out.update(nli.faithfulness(answer, contexts))
     if item.reference:
         out["reference_entailment"] = nli.entails(answer, item.reference)
+
+    if config.LLM_JUDGE:
+        from .llm_judge import judge_answer
+
+        out.update(judge_answer(item.question, item.reference, answer, item.answerable))
 
     if refused:
         correct = False
@@ -71,11 +80,16 @@ def run_eval(
     per_question = []
     t0 = time.time()
     for qi, item in enumerate(items, 1):
-        docs = retriever.invoke(item.question)
+        question = item.question
+        if item.history:
+            from ..followup import standalone_question
+
+            question = standalone_question(item.question, item.history)
+        docs = retriever.invoke(question)
         contexts = [d.page_content for d in docs]
         samples = []
         for _ in range(n):
-            answer = answer_chain.invoke({"context": docs, "question": item.question})
+            answer = answer_chain.invoke({"context": docs, "question": question})
             samples.append(judge(item, answer, contexts, nli))
         c = sum(s["correct"] for s in samples)
 
@@ -86,6 +100,7 @@ def run_eval(
             "n": n,
             "n_correct": c,
             "accuracy": c / n,
+            "standalone_question": question if question != item.question else None,
             "sources": [d.metadata.get("source") for d in docs],
             "samples": samples,
         }
@@ -105,6 +120,10 @@ def run_eval(
         "nli_model": config.NLI_MODEL,
         "top_k": top_k or config.TOP_K,
         "search_type": config.SEARCH_TYPE,
+        "retrieval_mode": config.RETRIEVAL_MODE,
+        "rerank": config.RERANK,
+        "history_aware": config.HISTORY_AWARE,
+        "llm_judge": config.JUDGE_MODEL if config.LLM_JUDGE else None,
         "n_samples": n,
         "temperature": temperature,
         "n_questions": len(items),
@@ -148,6 +167,18 @@ def summarize(rows: list[dict], ks: tuple[int, ...]) -> dict:
         ),
         "claim_coverage": _mean(float(x["faithfulness"] is not None) for x in ans_samples),
     }
+    judged = [x for x in all_samples if x.get("judge_correct") is not None]
+    if judged:
+        from .llm_judge import cohen_kappa
+
+        s["llm_judge"] = {
+            "judge_accuracy": _mean(float(x["judge_correct"]) for x in judged),
+            "rule_accuracy": _mean(float(x["correct"]) for x in judged),
+            "agreement": _mean(float(x["judge_correct"] == x["correct"]) for x in judged),
+            "cohen_kappa": cohen_kappa([x["judge_correct"] for x in judged],
+                                       [x["correct"] for x in judged]),
+            "mean_score": _mean(x["judge_score"] for x in judged),
+        }
     # Abstention as a binary classifier: positive = "should say I don't know".
     tp = sum(x["refused"] for r in unans for x in r["samples"])
     fn = sum(not x["refused"] for r in unans for x in r["samples"])
@@ -181,7 +212,7 @@ def print_report(s: dict) -> None:
     for key in s:
         if key.startswith("pass"):
             print(f"  {key:<23} {fmt(s[key])}")
-    for section in ("retrieval", "answer", "truthfulness", "abstention"):
+    for section in ("retrieval", "answer", "truthfulness", "abstention", "llm_judge"):
         if s.get(section):
             print(f"\n{section.capitalize()}")
             for k, v in s[section].items():

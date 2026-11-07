@@ -163,17 +163,17 @@ class GuardedPipeline:
 
     # ----- public API -----
 
-    def invoke(self, question: str) -> dict:
-        for event in self.events(question):
+    def invoke(self, question: str, history: list[dict] | None = None) -> dict:
+        for event in self.events(question, history):
             if event["type"] == "final":
                 return event["result"]
         raise RuntimeError("pipeline ended without a result")
 
-    def stream(self, question: str):
+    def stream(self, question: str, history: list[dict] | None = None):
         """Yield only the answer text; the final result is available afterwards
         as self.last_result. Convenient for st.write_stream and CLIs."""
         self.last_result = None
-        for event in self.events(question):
+        for event in self.events(question, history):
             if event["type"] == "token":
                 yield event["text"]
             elif event["type"] == "final":
@@ -213,7 +213,9 @@ class GuardedPipeline:
             yield {"type": "token", "text": clean}
         return "".join(parts).strip(), sorted(actions), False
 
-    def events(self, question: str):
+    def events(self, question: str, history: list[dict] | None = None):
+        """history: earlier messages [{role, content}], oldest first, used to
+        rewrite follow-up questions (see rag/followup.py)."""
         from .eval.metrics import is_refusal
         from .intent import Intent
         from .policy import check_query
@@ -239,6 +241,16 @@ class GuardedPipeline:
         if pii:  # the placeholders carry no meaning; drop them for search and answering
             question = strip_redactions(question)
 
+        standalone = None
+        if history:
+            from .followup import standalone_question
+
+            yield {"type": "status", "stage": "followup", "message": "Reading the conversation…"}
+            rewritten = standalone_question(question, history)
+            # The rewrite is model output: it must pass the regex policy rules too.
+            if rewritten != question and check_query(rewritten, use_llm=False).safe:
+                standalone, question = rewritten, rewritten
+
         intent = None
         if config.INTENT_ENABLED:
             yield {"type": "status", "stage": "intent", "message": "Checking the question is about AI…"}
@@ -251,7 +263,8 @@ class GuardedPipeline:
         docs = self.retriever.invoke(question)
         score = _best_score(question, docs)
         result = {"question": question, "intent": intent, "local_score": score,
-                  "pii_redacted": pii, "stored": 0, "guard": guard}
+                  "pii_redacted": pii, "stored": 0, "guard": guard,
+                  "standalone_question": standalone}
 
         if docs and (score >= config.WEB_MIN_SCORE or not config.WEB_FALLBACK):
             yield {"type": "status", "stage": "generate", "message": "Answering from your documents…"}

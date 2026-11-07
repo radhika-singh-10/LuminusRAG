@@ -6,10 +6,10 @@ from pathlib import Path
 from rag import config
 
 
-def stream_answer(chain, question: str) -> dict:
+def stream_answer(chain, question: str, history: list[dict] | None = None) -> dict:
     """Print status lines and the answer as it streams; return the final result."""
     result, streaming = None, False
-    for event in chain.events(question):
+    for event in chain.events(question, history):
         if event["type"] == "status" and sys.stdout.isatty():
             print(f"\r\033[2K  … {event['message']}", end="", flush=True)
         elif event["type"] == "token":
@@ -33,6 +33,8 @@ def print_result(result: dict, answer_shown: bool = False) -> None:
         tags.append(f"answered from: {result['origin']}")
     if tags:
         print(f"\n[{' | '.join(tags)}]")
+    if result.get("standalone_question"):
+        print(f"[read as: {result['standalone_question']}]")
     if result.get("pii_redacted"):
         print(f"[redacted before use: {', '.join(result['pii_redacted'])}]")
     if result.get("web_error"):
@@ -227,7 +229,7 @@ def main() -> int:
 
     from rag.history import add_exchange, new_chat_id, redact_question
 
-    chat_id = new_chat_id()
+    chat_id, history = new_chat_id(), []
     print(f"Type a question (or 'exit'). Chat id: {chat_id}")
     while True:
         try:
@@ -237,9 +239,11 @@ def main() -> int:
             return 0
         if q.lower() in {"exit", "quit", ""}:
             return 0
-        result = stream_answer(chain, q)
+        result = stream_answer(chain, q, history)
         print_result(result, answer_shown=True)
         add_exchange(chat_id, redact_question(q), result["answer"])
+        history += [{"role": "user", "content": redact_question(q)},
+                    {"role": "assistant", "content": result["answer"]}]
 
 
 if __name__ == "__main__":

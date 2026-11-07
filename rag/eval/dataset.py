@@ -7,6 +7,7 @@ Fields:
   reference       gold answer text (used for token P/R/F1 and NLI correctness)
   must_include    phrases that must all appear for the answer to count as correct
   evidence        substrings that identify relevant chunks (retrieval P/R)
+  history         earlier turns [{role, content}] for follow-up questions
 """
 import json
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ class EvalItem:
     reference: str = ""
     must_include: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
+    history: list[dict] = field(default_factory=list)
 
 
 def load_dataset(path: Path) -> list[EvalItem]:

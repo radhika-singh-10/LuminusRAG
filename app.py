@@ -39,6 +39,8 @@ ORIGIN_LABELS = {"local": "📚 local documents", "web": "🌐 web search", "non
 
 def answer_meta(result: dict) -> str:
     parts = []
+    if result.get("standalone_question"):
+        parts.append(f"↪ read as: “{result['standalone_question']}”")
     if result.get("intent"):
         parts.append(f"Intent: `{result['intent'].category}`")
     if result.get("origin"):
@@ -147,7 +149,8 @@ with st.sidebar:
     st.caption(
         f"**LLM:** `{model}`  \n**Embeddings:** `{config.EMBED_MODEL.split('/')[-1]}`  \n"
         f"**Chunking:** {config.CHUNK_SIZE} chars, {config.CHUNK_OVERLAP} overlap  \n"
-        f"**Retrieval:** top {config.TOP_K}, {config.SEARCH_TYPE}  \n"
+        f"**Retrieval:** {config.RETRIEVAL_MODE}, top {config.TOP_K}"
+        f"{', reranked' if config.RERANK else ''}  \n"
         f"**Intent gate:** {'`' + config.INTENT_MODEL + '`' if config.INTENT_ENABLED else 'off'}  \n"
         f"**Policy guard:** regex + {'`' + config.GUARD_MODEL + '`' if config.GUARD_LLM else 'no LLM'}  \n"
         f"**Web fallback:** {'on (DuckDuckGo)' if config.WEB_FALLBACK else 'off'}"
@@ -292,7 +295,7 @@ with tab_ask:
                 final: dict = {}
 
                 def answer_tokens():
-                    for event in pipeline.events(question):
+                    for event in pipeline.events(question, history=messages[:-1]):
                         if event["type"] == "status":
                             status_line.caption(f"⏳ {event['message']}")
                         elif event["type"] == "token":

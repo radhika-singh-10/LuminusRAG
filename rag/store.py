@@ -26,16 +26,22 @@ def get_vectorstore() -> Chroma:
 
 def get_retriever(k: int | None = None):
     """Vector retriever, wrapped with knowledge-graph context when
-    RETRIEVAL_MODE is "graph" or "hybrid" (see rag/graph.py)."""
+    RETRIEVAL_MODE is "graph" or "hybrid" (see rag/graph.py), and with a
+    cross-encoder reranker when RERANK is on (see rag/rerank.py)."""
     k = k or config.TOP_K
-    search_kwargs = {"k": k}
+    fetch = max(config.RERANK_FETCH_K, k) if config.RERANK else k
+    search_kwargs = {"k": fetch}
     if config.SEARCH_TYPE == "mmr":
-        search_kwargs["fetch_k"] = max(20, k * 4)
-    vector = get_vectorstore().as_retriever(
+        search_kwargs["fetch_k"] = max(20, fetch * 4)
+    retriever = get_vectorstore().as_retriever(
         search_type=config.SEARCH_TYPE, search_kwargs=search_kwargs
     )
     if config.RETRIEVAL_MODE in ("graph", "hybrid"):
         from .graph import HybridRetriever
 
-        return HybridRetriever(vector=vector, mode=config.RETRIEVAL_MODE)
-    return vector
+        retriever = HybridRetriever(vector=retriever, mode=config.RETRIEVAL_MODE)
+    if config.RERANK:
+        from .rerank import RerankRetriever
+
+        retriever = RerankRetriever(base=retriever, k=k)
+    return retriever
