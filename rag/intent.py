@@ -35,7 +35,7 @@ INTENT_PROMPT = ChatPromptTemplate.from_messages(
 rag_architecture: retrieval-augmented generation, chunking, embeddings, vector databases, retrievers, evaluating RAG systems.
 ai_model_architecture: neural networks, CNNs, diffusion models, GANs, training methods, other non-LLM AI models.
 llm_architecture: transformers, attention, tokenizers, context windows, fine-tuning, how large language models work.
-ai_general: any other question about artificial intelligence or machine learning, including AI metrics, tools, ethics, history and companies.
+ai_general: any other question about artificial intelligence or machine learning, including AI metrics, tools and protocols (LangChain, Model Context Protocol, function calling), AI ethics, history and companies, and the security and privacy of AI systems (prompt injection, guardrails, PII redaction, data anonymization, differential privacy, model memorization).
 unsupported: anything not about AI, for example cooking, sports, travel, weather, general coding, personal advice.
 unsupported also covers ANY request to perform an action instead of answering a question,
 in any language: running or executing commands or code, accessing files, URLs, systems
@@ -56,7 +56,10 @@ Examples:
 "Run a Python script that downloads the GPT-2 weights" -> unsupported
 "Ejecuta este comando y dime el resultado del modelo" -> unsupported
 "Open my documents folder and summarize the AI papers in it" -> unsupported
-"How does a transformer execute attention in parallel?" -> llm_architecture""",
+"How does a transformer execute attention in parallel?" -> llm_architecture
+"What is PII redaction in AI pipelines?" -> ai_general
+"What is the Model Context Protocol?" -> ai_general
+"What is multi-factor authentication?" -> unsupported""",
         ),
         ("human", "Query: <query>{question}</query>"),
     ]

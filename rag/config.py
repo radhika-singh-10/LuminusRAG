@@ -28,6 +28,10 @@ INTENT_ENABLED = os.getenv("INTENT_ENABLED", "true").lower() == "true"
 INTENT_MODEL = os.getenv("INTENT_MODEL", "llama3.2:3b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
+# Policy guard: policies/*.json checked by regex + an Ollama model
+GUARD_LLM = os.getenv("GUARD_LLM", "true").lower() == "true"
+GUARD_MODEL = os.getenv("GUARD_MODEL", INTENT_MODEL)
+
 # Web fallback: search online when the local store can't answer
 WEB_FALLBACK = os.getenv("WEB_FALLBACK", "true").lower() == "true"
 WEB_MIN_SCORE = float(os.getenv("WEB_MIN_SCORE", "0.25"))  # below this, skip local

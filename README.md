@@ -25,10 +25,10 @@ flowchart TB
 
     subgraph PIPE["Question pipeline · rag/chain.py (LangChain LCEL)"]
         direction LR
-        SAFETY["Safety<br/>rag/safety.py<br/>block commands<br/>redact PII"]
+        SAFETY["Policy guard<br/>rag/policy.py + policies/*.json<br/>regex + LLM check<br/>reject unsafe · redact PII"]
         INTENT["Intent gate<br/>rag/intent.py<br/>AI questions only<br/>no action requests"]
         RETR["Retriever<br/>rag/store.py<br/>top-k / MMR"]
-        GEN["Answer chain<br/>prompt + LLM<br/>cited answer"]
+        GEN["Answer chain<br/>prompt + LLM<br/>output sanitizer"]
         WEBF["Web fallback<br/>rag/web.py<br/>search · fetch · clean<br/>rank · save"]
         SAFETY --> INTENT --> RETR --> GEN
         RETR -. "no good match /<br/>I don't know" .-> WEBF
@@ -36,12 +36,12 @@ flowchart TB
     end
 
     subgraph INGEST["Ingestion · rag/ingest.py"]
-        LOADER["Load PDF / TXT / MD<br/>split 1000 / 150<br/>hash per file"]
+        LOADER["Load PDF / TXT / MD<br/>policy-sanitize (drop injection,<br/>redact PII) · split · hash"]
     end
 
     subgraph MODELS["Local models"]
         direction LR
-        OLLAMA["Ollama<br/>llama3.2:3b<br/>intent classifier"]
+        OLLAMA["Ollama<br/>llama3.2:3b<br/>policy judge + intent classifier"]
         QWEN["Hugging Face<br/>Qwen2.5-1.5B-Instruct<br/>answer generator"]
         MINILM["all-MiniLM-L6-v2<br/>embeddings (384-d)"]
         NLI["DeBERTa-v3 NLI<br/>truthfulness checks"]
@@ -70,6 +70,8 @@ flowchart TB
     WEB_UI & CLI -- "upload / add" --> FILES
     FILES --> LOADER -- "embed + upsert" --> CHROMA
     INTENT --- OLLAMA
+    SAFETY --- OLLAMA
+    LOADER -. "injection / names check" .- OLLAMA
     RETR <--> CHROMA
     GEN --- QWEN
     GEN -.- CLAUDE
@@ -87,7 +89,7 @@ flowchart TB
 | Layer | Component | Job |
 |---|---|---|
 | Interfaces | `app.py`, `main.py` | Upload documents, ask questions, browse chunks, run evals |
-| Safety | `rag/safety.py` | Refuse command-like questions; redact PII before use; detect injected instructions in web text |
+| Policy guard | `rag/policy.py`, `rag/safety.py`, `policies/*.json` | Reject questions that violate the prompt-injection or PII policy (regex rules, then an LLM judge); redact contact details; sanitize uploaded documents, web passages, and answers |
 | Intent | `rag/intent.py` + Ollama | Let through only AI questions, and no requests to perform actions |
 | Retrieval | `rag/store.py` + Chroma | Find the top-k chunks for the question |
 | Generation | `rag/chain.py` + Qwen or Claude | Answer only from the retrieved context, with citations |
@@ -110,7 +112,8 @@ rag-langchain/
 │   ├── ingest.py        # load -> split -> embed -> incremental upsert
 │   ├── intent.py        # Ollama intent gate (AI questions only)
 │   ├── web.py           # web fallback: search, fetch, clean, rank, store
-│   ├── safety.py        # PII redaction, command and injection detection
+│   ├── policy.py        # policy guard: regex + LLM checks against policies/*.json
+│   ├── safety.py        # PII detectors, injection rules, output sanitizer
 │   ├── history.py       # chat history (LangChain SQL store) + summaries
 │   ├── chain.py         # retriever + prompt + LLM (LCEL)
 │   └── eval/
@@ -118,6 +121,8 @@ rag-langchain/
 │       ├── metrics.py   # retrieval, token P/R/F1, pass@k, pass^k, ...
 │       ├── truthfulness.py  # NLI faithfulness / contradiction
 │       ├── intent_eval.py   # intent gate accuracy
+│       ├── guard_eval.py    # policy guard on labeled attack / benign questions
+│       ├── security_eval.py # full-pipeline PII + prompt-injection eval
 │       ├── runner.py    # single eval run -> report
 │       └── harness.py   # multi-variant experiments + comparison table
 ├── eval/
@@ -125,6 +130,10 @@ rag-langchain/
 │   ├── intent_dataset.jsonl # labeled allowed / blocked queries
 │   ├── experiments.json # variants for `bench`
 │   └── results/         # run outputs (gitignored)
+├── policies/
+│   ├── prompt_injection.json  # injection rules: patterns, examples, scope
+│   └── pii.json               # PII rules and detectors
+├── security-testing/    # poisoned test documents + original test plans
 ├── data/                # put your .pdf / .txt / .md files here
 ├── requirements.txt
 └── .env.example
@@ -160,6 +169,8 @@ python main.py eval -n 5 -k 1,3,5              # evaluate on eval/dataset.jsonl
 python main.py bench                           # run + compare variants in eval/experiments.json
 python main.py bench --only baseline,mmr -v
 python main.py eval-intent                     # measure the intent gate
+python main.py eval-guard                      # policy guard on 84 labeled attack/benign questions
+python main.py eval-security -n 3              # full-pipeline PII + prompt-injection eval
 python main.py chats                           # list saved chats
 python main.py summarize                       # summarize each chat
 python main.py summarize --overview            # ...plus an overview of all chats
@@ -209,6 +220,38 @@ unreachable the gate fails closed: nothing is searched and the reply says the
 intent check is unavailable. Set `INTENT_ENABLED=false` to turn the gate off.
 `eval` and `bench` call retrieval directly, so they measure the RAG pipeline
 without the gate; `eval-intent` measures the gate on its own.
+
+## Policy guard
+
+Two JSON policies define what is unsafe:
+
+- `policies/prompt_injection.json`: PI-01 instruction override, PI-02 system
+  prompt extraction, PI-03 source/file/secret exfiltration, PI-04 command or
+  tool execution, PI-05 fake authority or mode switch, PI-06 encoded
+  instructions, PI-07 instructions addressed to an AI inside content.
+- `policies/pii.json`: PII-01 requests for another person's data, PII-02
+  social engineering, PII-03 memory or training-data leakage, PII-04
+  high-risk identifiers or credentials in the input (reject), PII-05 contact
+  details (redact), plus the detectors used for redaction.
+
+Each rule has a description, regex patterns, unsafe and safe examples, an
+action, and `applies_to` (`query`, `document`, or both).
+
+**Questions** go through `check_query` before anything else: regex rules and
+detectors first, then an Ollama model prompted with each policy's rules and
+examples. If either finds the question unsafe it is rejected, naming the rule.
+If the model can't be reached, the question is rejected (fail closed).
+
+**Uploaded documents** go through `sanitize_document` before indexing: HTML
+comments and images are removed, paragraphs that break a document-scoped
+injection rule are dropped (regex, or an LLM verdict whose quoted evidence is
+verified in the text), and PII is redacted, including names of private
+individuals found next to other personal data. Code blocks and text that only
+discusses prompts or attacks are kept. Policy changes re-index all files.
+
+**Answers** go through `sanitize_output`: PII and secrets are redacted, and
+images and links to hosts outside the sources are removed. Source excerpts
+are displayed as plain text.
 
 ## Safety
 

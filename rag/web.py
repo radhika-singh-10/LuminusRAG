@@ -141,7 +141,7 @@ def fetch_text(url: str) -> str | None:
 
 def clean_passage(text: str) -> str | None:
     """None if the passage tries to instruct the model; otherwise PII-redacted text."""
-    if looks_like_injection(text):
+    if looks_like_injection(text, "document"):
         return None
     return redact_pii(text)[0]
 
@@ -180,14 +180,24 @@ def web_documents(query: str, k: int | None = None) -> tuple[list[Document], dic
     if not candidates:
         return [], stats
 
+    from .policy import sanitize_document
+
     emb = get_embeddings()
     q = np.asarray(emb.embed_query(query))
     d = np.asarray(emb.embed_documents([c.page_content for c in candidates]))
     picked = []
-    for i in np.argsort(-(d @ q))[:k]:
+    # Full policy check (regex + LLM + private names) on the best passages only.
+    for i in np.argsort(-(d @ q))[: k * 2]:
         doc = candidates[i]
+        clean, rep = sanitize_document(doc.page_content)
+        stats["dropped_injection"] += len(rep["dropped_paragraphs"])
+        if len(clean.split()) < 8:
+            continue
+        doc.page_content = clean
         doc.metadata["score"] = float(d[i] @ q)
         picked.append(doc)
+        if len(picked) == k:
+            break
     return picked, stats
 
 

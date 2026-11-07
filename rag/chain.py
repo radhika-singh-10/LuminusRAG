@@ -115,24 +115,24 @@ def _best_score(question: str, docs: list[Document]) -> float:
     return float((d @ q).max())
 
 
-ACTION_BLOCKED_MESSAGE = (
-    "Query unsupported. Requests to run commands, execute code, or perform "
-    "actions are not allowed. Ask a question about AI instead."
-)
-
-
 def build_guarded_chain(llm: BaseChatModel | None = None) -> Runnable:
-    """Full pipeline: safety -> intent gate -> local store -> web (-> store).
+    """Full pipeline: policy guard -> intent gate -> local store -> web (-> store)
+    -> output sanitizer.
 
-    1. Safety: questions containing shell/code commands are refused. PII and
-       secrets are redacted; only the redacted question is used from here on,
-       so nothing personal is sent to the search engine or saved.
+    1. Policy guard (rag/policy.py): the question is checked against
+       policies/prompt_injection.json and policies/pii.json, first by their
+       regex rules and detectors, then by an Ollama model prompted with each
+       policy. Unsafe questions are rejected. Contact details are redacted and
+       only the redacted question is used from here on.
     2. Intent gate (Ollama): only AI questions continue. Requests to perform
        actions, in any language, are refused.
     3. Local: retrieve from Chroma. If the best match scores >= WEB_MIN_SCORE,
        answer from it; a real answer (not "I don't know") is returned.
     4. Web: otherwise search the web with the redacted question, answer from
        cleaned passages, and save them into Chroma when they gave an answer.
+
+    5. Output: every answer is sanitized (PII redacted, images and links to
+       unknown hosts removed) before it is returned or saved.
 
     The pipeline never executes anything: the LLMs have no tools, and model or
     web output is only displayed or stored as text.
@@ -142,23 +142,33 @@ def build_guarded_chain(llm: BaseChatModel | None = None) -> Runnable:
     """
     from .eval.metrics import is_refusal
     from .intent import Intent
-    from .safety import find_command, redact_pii, strip_redactions
+    from .policy import check_query
+    from .safety import sanitize_output, strip_redactions
     from .web import store_web_documents, web_documents
 
     llm = llm or get_llm()
     retriever = get_retriever()
     answer_chain = build_answer_chain(llm)
 
-    def blocked(question: str, intent, pii: list[str]) -> dict:
+    def blocked(question: str, intent, pii: list[str], guard=None) -> dict:
         return {"question": question, "context": [], "answer": intent.message, "intent": intent,
-                "origin": None, "local_score": None, "pii_redacted": pii, "stored": 0}
+                "origin": None, "local_score": None, "pii_redacted": pii, "stored": 0,
+                "guard": guard}
+
+    def finish(result: dict, docs: list, answer: str, origin: str) -> dict:
+        urls = {d.metadata.get("source", "") for d in docs if d.metadata.get("origin") == "web"}
+        answer, actions = sanitize_output(answer, urls)
+        return {**result, "context": docs, "answer": answer, "origin": origin,
+                "output_actions": actions}
 
     def run(question: str) -> dict:
-        if command := find_command(question):
-            return blocked(question, Intent("blocked_action", False, ACTION_BLOCKED_MESSAGE,
-                                            f"command-like text: {command[:60]}"), [])
+        guard = check_query(question)
+        if not guard.safe:
+            category = "guard_error" if guard.source == "error" else "blocked_policy"
+            redacted_q = strip_redactions(guard.text) if guard.text else "[question withheld]"
+            return blocked(redacted_q, Intent(category, False, guard.message, guard.reason), [], guard)
 
-        question, pii = redact_pii(question)
+        question, pii = guard.text, guard.redacted
         if pii:  # the placeholders carry no meaning; drop them for search and answering
             question = strip_redactions(question)
 
@@ -171,12 +181,12 @@ def build_guarded_chain(llm: BaseChatModel | None = None) -> Runnable:
         docs = retriever.invoke(question)
         score = _best_score(question, docs)
         result = {"question": question, "intent": intent, "local_score": score,
-                  "pii_redacted": pii, "stored": 0}
+                  "pii_redacted": pii, "stored": 0, "guard": guard}
 
         if docs and (score >= config.WEB_MIN_SCORE or not config.WEB_FALLBACK):
             answer = answer_chain.invoke({"context": docs, "question": question})
             if not (config.WEB_FALLBACK and is_refusal(answer)):
-                return {**result, "context": docs, "answer": answer, "origin": "local"}
+                return finish(result, docs, answer, "local")
 
         if config.WEB_FALLBACK:
             web_docs = []
@@ -193,7 +203,7 @@ def build_guarded_chain(llm: BaseChatModel | None = None) -> Runnable:
                         result["stored"] = store_web_documents(on_topic, question)
                     except Exception as e:
                         result["store_error"] = f"{type(e).__name__}: {e}"
-                return {**result, "context": web_docs, "answer": answer, "origin": "web"}
+                return finish(result, web_docs, answer, "web")
             result.setdefault("web_error", "web search returned no usable results")
 
         return {**result, "context": [], "answer": REFUSAL, "origin": "none"}

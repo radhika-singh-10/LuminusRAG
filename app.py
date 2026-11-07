@@ -47,6 +47,11 @@ def answer_meta(result: dict) -> str:
         parts.append(f"🔒 redacted: {', '.join(result['pii_redacted'])}")
     if result.get("stored"):
         parts.append(f"💾 saved {result['stored']} web passages")
+    if result.get("output_actions"):
+        parts.append(f"🧹 answer cleaned: {'; '.join(result['output_actions'])}")
+    guard = result.get("guard")
+    if guard is not None and not guard.safe:
+        parts.append(f"🛡 rejected by {guard.rule_id or 'guard'} ({guard.source})")
     return " · ".join(parts)
 
 
@@ -70,6 +75,18 @@ def process_uploads(files) -> None:
             name = Path(info.get("source", "")).name
             if event == "loaded":
                 st.write(f"**2. Extract** — read text from {info['files']} file(s) in the data folder")
+            elif event == "sanitized":
+                parts = []
+                if info["dropped"]:
+                    rules = ", ".join(sorted({d["rule"] for d in info["dropped"]}))
+                    parts.append(f"removed **{len(info['dropped'])} prompt-injection passage(s)** ({rules})")
+                if info["hidden"]:
+                    parts.append(f"removed {info['hidden']} hidden comment/image(s)")
+                if info["redacted"]:
+                    parts.append(f"redacted **{', '.join(info['redacted'])}**")
+                st.write(f"🛡 **Policy check** — `{name}`: " + ("; ".join(parts) or "no issues found"))
+                for d in info["dropped"]:
+                    st.caption(f"{d['rule']}: {d['text'][:100]}…")
             elif event == "skip":
                 st.write(f"↷ `{name}` unchanged, skipped")
             elif event == "split":
@@ -123,6 +140,7 @@ with st.sidebar:
         f"**Chunking:** {config.CHUNK_SIZE} chars, {config.CHUNK_OVERLAP} overlap  \n"
         f"**Retrieval:** top {config.TOP_K}, {config.SEARCH_TYPE}  \n"
         f"**Intent gate:** {'`' + config.INTENT_MODEL + '`' if config.INTENT_ENABLED else 'off'}  \n"
+        f"**Policy guard:** regex + {'`' + config.GUARD_MODEL + '`' if config.GUARD_LLM else 'no LLM'}  \n"
         f"**Web fallback:** {'on (DuckDuckGo)' if config.WEB_FALLBACK else 'off'}"
         f"{', saves results' if config.WEB_FALLBACK and config.WEB_STORE else ''}"
     )
@@ -165,7 +183,8 @@ tab_upload, tab_ask, tab_history, tab_docs, tab_eval = st.tabs(
 with tab_upload:
     st.subheader("Upload documents")
     st.caption("PDF, TXT or Markdown. New files are processed automatically: "
-               "extract text → split into chunks → embed → store in Chroma.")
+               "extract text → policy check (remove prompt injection, redact PII) → "
+               "split into chunks → embed → store in Chroma.")
     files = st.file_uploader(
         "Drop files here",
         type=["pdf", "txt", "md"],
@@ -185,8 +204,8 @@ with tab_upload:
         st.markdown("**Last processing run**")
         st.dataframe(
             pd.DataFrame(report).assign(file=lambda d: d["source"].map(lambda s: Path(s).name))[
-                ["file", "status", "pages", "pages_with_text", "characters", "chunks",
-                 "avg_chunk_chars", "seconds"]
+                ["file", "status", "pages", "chunks", "injections_removed", "hidden_removed",
+                 "pii_redacted", "seconds"]
             ],
             hide_index=True,
             width="stretch",
@@ -234,7 +253,8 @@ with tab_ask:
         with st.expander(f"Sources ({len(sources)})"):
             for i, s in enumerate(sources, 1):
                 st.markdown(f"**[{i}] {s['label']}**")
-                st.caption(s["text"][:600] + ("…" if len(s["text"]) > 600 else ""))
+                # Plain text: source text never renders as markdown (no images or links).
+                st.text(s["text"][:600] + ("…" if len(s["text"]) > 600 else ""))
 
     if not docs:
         st.info("Upload a document in the **Upload & process** tab first.")

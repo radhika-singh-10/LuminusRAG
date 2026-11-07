@@ -1,37 +1,38 @@
-"""Safety checks for questions and web content.
+"""Deterministic safety checks, driven by the JSON policies in policies/.
 
-- redact_pii: strips personal data and secrets before anything leaves the
-  machine (web search) or is stored from the web.
-- find_command: flags questions that contain shell/code commands. The system
-  never executes anything, and such questions are refused outright.
-- looks_like_injection: flags web passages that try to instruct the model;
-  those passages are dropped before they reach the model or the store.
+- redact_pii: replaces personal data and secrets using the detectors in
+  policies/pii.json.
+- injection_rule: the first prompt-injection rule (policies/prompt_injection.json)
+  whose regex matches, or None.
+- find_command: flags shell/code commands. The system never executes anything.
+- strip_hidden_content: removes HTML comments and images that readers don't
+  see but a model would.
+- sanitize_output: cleans a model answer before it is shown or saved.
 
-These are pattern checks. The Ollama intent gate adds a language-independent
-check that refuses requests to perform actions (see rag/intent.py).
+The LLM-based policy checks build on these in rag/policy.py.
 """
+import base64
+import binascii
+import json
 import re
+from functools import lru_cache
+from pathlib import Path
+
+POLICY_DIR = Path(__file__).resolve().parent.parent / "policies"
+
+
+@lru_cache(maxsize=None)
+def load_policy(name: str) -> dict:
+    """Load policies/<name>.json and compile its regexes."""
+    data = json.loads((POLICY_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    for rule in data["rules"]:
+        rule["_compiled"] = [re.compile(p, re.IGNORECASE) for p in rule.get("patterns", [])]
+    for det in data.get("detectors", []):
+        det["_compiled"] = re.compile(det["pattern"])
+    return data
+
 
 # ---------- PII and secrets ----------
-
-_PII_PATTERNS: list[tuple[str, re.Pattern]] = [
-    ("email", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")),
-    ("secret", re.compile(
-        r"\b(?:sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}"
-        r"|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}"
-        r"|xox[abp]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,})\b")),
-    ("secret", re.compile(
-        r"(?i)\b(?:password|passwd|pwd|api[_-]?key|token|secret|bearer)\b\s*[:=]?\s*\S{6,}")),
-    ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
-    ("card", re.compile(r"\b(?:\d[ -]?){13,19}\b")),
-    ("iban", re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){3,7}(?:[ ]?[A-Z0-9]{1,3})?\b")),
-    ("ip", re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")),
-    ("phone", re.compile(
-        r"(?<![\w-])(?:\+\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)|\d{2,4})[\s.-]\d{3,4}[\s.-]\d{3,4}(?![\w-])")),
-    ("aadhaar", re.compile(r"\b\d{4}[ -]\d{4}[ -]\d{4}\b")),
-    ("pan", re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b")),
-]
-
 
 def _luhn_ok(digits: str) -> bool:
     nums = [int(c) for c in digits][::-1]
@@ -39,24 +40,45 @@ def _luhn_ok(digits: str) -> bool:
     return total % 10 == 0
 
 
+_PLACEHOLDER_SECRET = re.compile(
+    r"your[-_ ]?(?:key|token|secret|password)|<[^>]*>|x{3,}|\.\.\.|placeholder|changeme|\*{3,}",
+    re.IGNORECASE)
+
+
+def _valid(det: dict, value: str) -> bool:
+    if det["kind"] == "secret" and _PLACEHOLDER_SECRET.search(value):
+        return False  # documentation placeholder, not a real secret
+    if det.get("validator") == "luhn":
+        digits = re.sub(r"\D", "", value)
+        return 13 <= len(digits) <= 19 and _luhn_ok(digits)
+    return True
+
+
+def detect_pii(text: str) -> list[tuple[str, str]]:
+    """[(kind, matched text)] for every PII detector hit, in policy order."""
+    return [
+        (det["kind"], m.group())
+        for det in load_policy("pii")["detectors"]
+        for m in det["_compiled"].finditer(text)
+        if _valid(det, m.group())
+    ]
+
+
 def redact_pii(text: str) -> tuple[str, list[str]]:
     """Return (text with PII replaced by [REDACTED_<KIND>], kinds found)."""
     found: list[str] = []
+    for det in load_policy("pii")["detectors"]:
+        def sub(m: re.Match, det=det) -> str:
+            if not _valid(det, m.group()):
+                return m.group()
+            found.append(det["kind"])
+            return f"[REDACTED_{det['kind'].upper()}]"
 
-    for kind, pattern in _PII_PATTERNS:
-        def sub(m: re.Match, kind=kind) -> str:
-            if kind == "card":
-                digits = re.sub(r"\D", "", m.group())
-                if not (13 <= len(digits) <= 19 and _luhn_ok(digits)):
-                    return m.group()
-            found.append(kind)
-            return f"[REDACTED_{kind.upper()}]"
-
-        text = pattern.sub(sub, text)
+        text = det["_compiled"].sub(sub, text)
     return text, sorted(set(found))
 
 
-_PLACEHOLDER = re.compile(r"\[REDACTED_[A-Z]+\]")
+_PLACEHOLDER = re.compile(r"\[REDACTED_[A-Z_]+\]")
 
 
 def strip_redactions(text: str) -> str:
@@ -72,6 +94,103 @@ def strip_redactions(text: str) -> str:
     text = " ".join(clean) if clean else _PLACEHOLDER.sub(" ", text)
     text = re.sub(r"\s+([,.;:?!])", r"\1", text)
     return " ".join(text.split())
+
+
+# ---------- prompt injection ----------
+
+_B64 = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
+
+
+def decoded_payloads(text: str) -> list[str]:
+    """Readable text hidden in base64 blobs inside `text`."""
+    out = []
+    for blob in _B64.findall(text):
+        try:
+            decoded = base64.b64decode(blob + "=" * (-len(blob) % 4), validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            continue
+        if decoded and sum(c.isprintable() for c in decoded) / len(decoded) > 0.9:
+            out.append(decoded)
+    return out
+
+
+def injection_rule(text: str, mode: str = "query") -> dict | None:
+    """First prompt-injection rule (that applies to `mode`) whose pattern matches
+    text or readable base64 inside it. mode is "query" or "document"."""
+    candidates = [text, *decoded_payloads(text)]
+    for rule in load_policy("prompt_injection")["rules"]:
+        if mode not in rule.get("applies_to", ["query", "document"]):
+            continue
+        for pattern in rule["_compiled"]:
+            for candidate in candidates:
+                if m := pattern.search(candidate):
+                    return {"id": rule["id"], "name": rule["name"], "match": m.group()[:80],
+                            "encoded": candidate is not text}
+    return None
+
+
+def looks_like_injection(text: str, mode: str = "document") -> bool:
+    return injection_rule(text, mode) is not None
+
+
+# ---------- hidden content ----------
+
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_HTML_IMG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+
+
+def strip_hidden_content(text: str) -> tuple[str, dict]:
+    """Remove HTML comments and images (tracking pixels, exfiltration URLs)."""
+    counts = {
+        "html_comments": len(_HTML_COMMENT.findall(text)),
+        "images": len(_MD_IMAGE.findall(text)) + len(_HTML_IMG.findall(text)),
+    }
+    text = _HTML_COMMENT.sub(" ", text)
+    text = _MD_IMAGE.sub(" ", text)
+    text = _HTML_IMG.sub(" ", text)
+    return text, counts
+
+
+_MD_LINK = re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)[^)]*\)")
+_BARE_URL = re.compile(r"(?<!\()https?://[^\s)>\]]+")
+
+
+def _host(url: str) -> str:
+    return re.sub(r"^https?://([^/:]+).*", r"\1", url).lower()
+
+
+def sanitize_output(answer: str, allowed_urls: set[str]) -> tuple[str, list[str]]:
+    """Clean a model answer before it is shown or saved.
+
+    Removes images, unwraps links to hosts that weren't among the retrieved
+    sources, removes unknown bare URLs, and redacts PII and secrets.
+    Returns (answer, actions taken).
+    """
+    actions = []
+    answer, hidden = strip_hidden_content(answer)
+    if hidden["images"] or hidden["html_comments"]:
+        actions.append("removed images/hidden content")
+    allowed = {_host(u) for u in allowed_urls}
+
+    def link(m: re.Match) -> str:
+        if _host(m.group(2)) in allowed:
+            return m.group(0)
+        actions.append("removed unknown link")
+        return m.group(1)
+
+    def bare(m: re.Match) -> str:
+        if _host(m.group(0)) in allowed:
+            return m.group(0)
+        actions.append("removed unknown link")
+        return "[link removed]"
+
+    answer = _MD_LINK.sub(link, answer)
+    answer = _BARE_URL.sub(bare, answer)
+    answer, kinds = redact_pii(answer)
+    if kinds:
+        actions.append("redacted " + ", ".join(kinds))
+    return answer, sorted(set(actions))
 
 
 # ---------- commands / code execution requests ----------
@@ -97,36 +216,3 @@ def find_command(text: str) -> str | None:
     """The first command-like fragment in text, or None."""
     m = _COMMAND_RE.search(text)
     return m.group().strip() if m else None
-
-
-# ---------- prompt injection in web content ----------
-
-_INJECTION_PATTERNS = [
-    # English
-    r"ignore (?:all |any )?(?:the )?(?:previous|prior|above|earlier|preceding) (?:instructions|prompts|rules|messages)",
-    r"disregard (?:all |any )?(?:the )?(?:previous|prior|above|system) (?:instructions|prompt|rules)",
-    r"forget (?:all |everything |your )?(?:previous |prior )?(?:instructions|rules)",
-    r"\b(?:reveal|print|show|output|repeat|leak|display)\b.{0,40}\b(?:system|developer|hidden) (?:prompt|instructions)\b",
-    r"\byou are now\b|\bact as (?:an?|the) \w+|\bfrom now on,? you\b",
-    r"\bnew instructions?\s*:",
-    r"\b(?:execute|run) (?:the following|this) (?:command|code|script)",
-    r"\b(?:assistant|ai|model|llm|chatbot)s?,? (?:must|should) (?:now )?(?:ignore|reveal|send|execute|output)",
-    r"<\s*/?\s*(?:system|instructions?)\s*>|\[\s*(?:system|INST)\s*\]",
-    # Other languages
-    r"ignora (?:todas )?las instrucciones",                      # es
-    r"ignorez (?:toutes )?les instructions",                     # fr
-    r"ignoriere (?:alle )?(?:vorherigen )?anweisungen",          # de
-    r"ignora (?:tutte )?le istruzioni",                          # it
-    r"ignore (?:todas )?as instruções",                          # pt
-    r"игнорируй(?:те)? (?:все )?(?:предыдущие )?инструкции",     # ru
-    r"忽略(?:之前|以上|所有)?的?(?:指令|指示|说明)",                 # zh
-    r"(?:以前|前)の指示を無視",                                     # ja
-    r"이전 지시(?:를|사항을)? 무시",                                 # ko
-    r"निर्देशों को (?:अनदेखा|नज़रअंदाज़|नजरअंदाज)",                    # hi
-    r"تجاهل (?:جميع )?التعليمات",                                 # ar
-]
-_INJECTION_RE = re.compile("|".join(f"(?:{p})" for p in _INJECTION_PATTERNS), re.IGNORECASE)
-
-
-def looks_like_injection(text: str) -> bool:
-    return bool(_INJECTION_RE.search(text))

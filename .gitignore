@@ -225,3 +225,6 @@ chroma_db/
 data/uploads/
 eval/results/
 chats/
+
+# macOS
+.DS_Store

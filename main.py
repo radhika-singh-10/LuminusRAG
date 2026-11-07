@@ -1,4 +1,4 @@
-"""CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize"""
+"""CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security"""
 import argparse
 import sys
 from pathlib import Path
@@ -59,6 +59,13 @@ def main() -> int:
     summ.add_argument("chat_id", nargs="?", help="One chat id (default: every chat)")
     summ.add_argument("--limit", type=int, default=None, help="Only the N most recent chats")
     summ.add_argument("--overview", action="store_true", help="Also combine into one overview")
+    es = sub.add_parser("eval-security", help="Full-pipeline security eval: PII and prompt injection")
+    es.add_argument("-n", type=int, default=3, help="Samples per case (for pass@k)")
+    es.add_argument("-k", default="1,3", help="Comma-separated k values")
+    es.add_argument("--temperature", type=float, default=0.7)
+    es.add_argument("--limit", type=int, default=None)
+    eg = sub.add_parser("eval-guard", help="Measure the policy guard on labeled attack/benign questions")
+    eg.add_argument("--no-llm", action="store_true", help="Regex rules only")
     sub.add_parser("eval-intent", help="Measure the Ollama intent gate on labeled queries")
     bench = sub.add_parser("bench", help="Run and compare eval variants from an experiments file")
     bench.add_argument("--config", type=Path, default=config.ROOT / "eval" / "experiments.json")
@@ -105,6 +112,20 @@ def main() -> int:
         if overview:
             print(f"\n=== Overview of all chats\n{overview}")
         print()
+        return 0
+
+    if args.cmd == "eval-security":
+        from rag.eval.security_eval import print_security_report, run_security_eval
+
+        summary = run_security_eval(n=args.n, ks=tuple(int(k) for k in args.k.split(",")),
+                                    temperature=args.temperature, limit=args.limit)
+        print_security_report(summary)
+        return 0
+
+    if args.cmd == "eval-guard":
+        from rag.eval.guard_eval import run_guard_eval
+
+        run_guard_eval(use_llm=False if args.no_llm else None)
         return 0
 
     if args.cmd == "eval-intent":

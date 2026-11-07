@@ -15,6 +15,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from . import config
+from .policy import sanitize_document
 from .store import get_vectorstore
 
 
@@ -54,6 +55,10 @@ def file_hash(path: str | Path) -> str:
             h.update(block)
     # Chunking settings are part of the hash so changing them re-indexes.
     h.update(f"|{config.CHUNK_SIZE}|{config.CHUNK_OVERLAP}|{config.EMBED_MODEL}".encode())
+    # Policy changes re-index everything, so stored text always matches current rules.
+    for policy in sorted((config.ROOT / "policies").glob("*.json")):
+        h.update(policy.read_bytes())
+    h.update(f"|guard_llm={config.GUARD_LLM}".encode())
     return h.hexdigest()
 
 
@@ -180,6 +185,16 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
             stats["added_files"] += 1
 
         t0 = time.time()
+        # Security: drop prompt-injection passages and redact PII before anything
+        # is embedded or stored (policies/prompt_injection.json, policies/pii.json).
+        sanitized = {"dropped": [], "redacted": set(), "hidden": 0}
+        for d in file_docs:
+            d.page_content, rep = sanitize_document(d.page_content)
+            sanitized["dropped"] += rep["dropped_paragraphs"]
+            sanitized["redacted"] |= set(rep["redacted"])
+            sanitized["hidden"] += rep["html_comments"] + rep["images"]
+        emit("sanitized", {"source": source, "dropped": sanitized["dropped"],
+                           "redacted": sorted(sanitized["redacted"]), "hidden": sanitized["hidden"]})
         text_pages = [d for d in file_docs if d.page_content.strip()]
         chunks = split_documents(text_pages)
         report = {
@@ -190,6 +205,9 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
             "chunks": len(chunks),
             "avg_chunk_chars": round(sum(len(c.page_content) for c in chunks) / len(chunks)) if chunks else 0,
             "status": "updated" if old and old["ids"] else "added",
+            "injections_removed": len(sanitized["dropped"]),
+            "hidden_removed": sanitized["hidden"],
+            "pii_redacted": ", ".join(sorted(sanitized["redacted"])) or "-",
         }
         emit("split", report)
         if not chunks:
