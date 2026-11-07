@@ -84,7 +84,14 @@ def add_files(paths: list[str | Path]) -> dict:
 
 
 def remove_source(source: str) -> int:
-    """Delete a file from DATA_DIR and its chunks from the index. Returns chunks removed."""
+    """Delete a file from DATA_DIR (or a stored web page) and its chunks from the index.
+    Returns chunks removed."""
+    if source.startswith(("http://", "https://")):
+        store = get_vectorstore()
+        ids = store.get(where={"source": source}, include=[])["ids"]
+        if ids:
+            store.delete(ids=ids)
+        return len(ids)
     path = Path(source).resolve()
     if config.DATA_DIR.resolve() not in path.parents:
         raise ValueError(f"Refusing to delete a file outside {config.DATA_DIR}")
@@ -112,7 +119,10 @@ def list_indexed() -> list[dict]:
     agg: dict[str, dict] = {}
     for meta in data["metadatas"]:
         src = meta.get("source", "unknown")
-        e = agg.setdefault(src, {"source": src, "name": Path(src).name, "chunks": 0, "pages": set()})
+        web = meta.get("origin") == "web"
+        name = f"🌐 {meta.get('title') or src}" if web else Path(src).name
+        e = agg.setdefault(src, {"source": src, "name": name, "chunks": 0, "pages": set(),
+                                 "origin": "web" if web else "file"})
         e["chunks"] += 1
         if meta.get("page") is not None:
             e["pages"].add(meta["page"])
@@ -147,6 +157,8 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
     existing = store.get(include=["metadatas"])
     indexed: dict[str, dict] = defaultdict(lambda: {"hash": None, "ids": []})
     for id_, meta in zip(existing["ids"], existing["metadatas"]):
+        if meta.get("origin") == "web":  # stored web passages, managed separately
+            continue
         entry = indexed[meta.get("source", "")]
         entry["hash"] = meta.get("file_hash")
         entry["ids"].append(id_)

@@ -9,7 +9,11 @@ import pandas as pd
 import streamlit as st
 
 from rag import config
-from rag.chain import build_chain, get_llm
+from rag.chain import build_guarded_chain, get_llm
+from rag.history import (
+    add_exchange, delete_chat, list_chats, load_messages, new_chat_id, redact_question,
+    summarize_all, summarize_chat, summarize_messages,
+)
 from rag.ingest import get_chunks, ingest, list_indexed, remove_source, save_upload
 
 st.set_page_config(page_title="Document Q&A", page_icon="📄", layout="wide")
@@ -21,9 +25,29 @@ def cached_llm():
 
 
 def source_label(meta: dict) -> str:
+    if meta.get("origin") == "web":
+        return f"🌐 [{meta.get('title') or meta['source']}]({meta['source']})"
     name = Path(meta.get("source", "unknown")).name
     page = meta.get("page")
     return f"{name}, page {page + 1}" if page is not None else name
+
+
+ORIGIN_LABELS = {"local": "📚 local documents", "web": "🌐 web search", "none": "nothing found"}
+
+
+def answer_meta(result: dict) -> str:
+    parts = []
+    if result.get("intent"):
+        parts.append(f"Intent: `{result['intent'].category}`")
+    if result.get("origin"):
+        parts.append(f"Answered from: {ORIGIN_LABELS[result['origin']]}")
+    if result.get("local_score") is not None:
+        parts.append(f"best local match: {result['local_score']:.2f}")
+    if result.get("pii_redacted"):
+        parts.append(f"🔒 redacted: {', '.join(result['pii_redacted'])}")
+    if result.get("stored"):
+        parts.append(f"💾 saved {result['stored']} web passages")
+    return " · ".join(parts)
 
 
 def indexed_docs() -> list[dict]:
@@ -97,11 +121,43 @@ with st.sidebar:
     st.caption(
         f"**LLM:** `{model}`  \n**Embeddings:** `{config.EMBED_MODEL.split('/')[-1]}`  \n"
         f"**Chunking:** {config.CHUNK_SIZE} chars, {config.CHUNK_OVERLAP} overlap  \n"
-        f"**Retrieval:** top {config.TOP_K}, {config.SEARCH_TYPE}"
+        f"**Retrieval:** top {config.TOP_K}, {config.SEARCH_TYPE}  \n"
+        f"**Intent gate:** {'`' + config.INTENT_MODEL + '`' if config.INTENT_ENABLED else 'off'}  \n"
+        f"**Web fallback:** {'on (DuckDuckGo)' if config.WEB_FALLBACK else 'off'}"
+        f"{', saves results' if config.WEB_FALLBACK and config.WEB_STORE else ''}"
     )
 
-tab_upload, tab_ask, tab_docs, tab_eval = st.tabs(
-    ["📤 Upload & process", "💬 Ask", "📚 Documents", "📊 Evaluate"]
+    # ----- chat history -----
+    st.divider()
+    st.subheader("💬 Chats")
+    if st.button("➕ New chat", width="stretch"):
+        st.session_state.chat_id = new_chat_id()
+        st.session_state.messages = []
+        st.session_state.pop("chat_summary", None)
+        st.rerun()
+    st.session_state.setdefault("chat_id", new_chat_id())
+    previous = list_chats()
+    if not previous:
+        st.caption("No saved chats yet. Chats are saved after each answer.")
+    for c in previous[:15]:
+        current = c["id"] == st.session_state.chat_id
+        col_open, col_del = st.columns([5, 1])
+        label = f"{'▶ ' if current else ''}{c['title']}"
+        if col_open.button(label, key=f"open-{c['id']}", help=f"{c['updated']} · "
+                           f"{c['n_messages']} messages", width="stretch", disabled=current):
+            st.session_state.chat_id = c["id"]
+            st.session_state.messages = load_messages(c["id"])
+            st.session_state.pop("chat_summary", None)
+            st.rerun()
+        if col_del.button("✕", key=f"delchat-{c['id']}", help="Delete this chat"):
+            delete_chat(c["id"])
+            if current:
+                st.session_state.chat_id = new_chat_id()
+                st.session_state.messages = []
+            st.rerun()
+
+tab_upload, tab_ask, tab_history, tab_docs, tab_eval = st.tabs(
+    ["📤 Upload & process", "💬 Ask", "🗂 History", "📚 Documents", "📊 Evaluate"]
 )
 
 # ---------- upload & process ----------
@@ -140,11 +196,39 @@ with tab_upload:
 
 with tab_ask:
     messages = st.session_state.setdefault("messages", [])
-    head, clear = st.columns([6, 1])
+    head, b_this, b_all = st.columns([4, 1.4, 1.6])
     head.subheader("Ask your documents")
-    if clear.button("Clear chat", disabled=not messages):
-        messages.clear()
-        st.rerun()
+    if b_this.button("📝 Summarize chat", disabled=not messages, width="stretch"):
+        with st.spinner("Summarizing this chat…"):
+            st.session_state.chat_summary = {
+                "title": "Summary of this chat",
+                "overview": summarize_messages(messages, cached_llm()),
+                "chats": [],
+            }
+    if b_all.button("🗂 Summarize all chats", disabled=not list_chats(), width="stretch"):
+        bar = st.progress(0.0, text="Summarizing previous chats…")
+
+        def on_progress(i, total, title):
+            bar.progress(i / (total + 1), text=f"Summarizing chat {i}/{total}: {title}")
+
+        result = summarize_all(cached_llm(), progress=on_progress)
+        bar.empty()
+        st.session_state.chat_summary = {"title": "Summary of previous chats", **result}
+
+    if summary := st.session_state.get("chat_summary"):
+        with st.container(border=True):
+            top, close = st.columns([8, 1])
+            top.markdown(f"**{summary['title']}**")
+            if close.button("Close", key="close-summary"):
+                st.session_state.pop("chat_summary")
+                st.rerun()
+            st.markdown(summary["overview"])
+            if summary["chats"]:
+                with st.expander(f"Per-chat summaries ({len(summary['chats'])})"):
+                    for c in summary["chats"]:
+                        st.markdown(f"**{c['title']}** · {c['updated'][:16].replace('T', ' ')}")
+                        st.markdown(c["summary"])
+                        st.divider()
 
     def render_sources(sources: list[dict]) -> None:
         with st.expander(f"Sources ({len(sources)})"):
@@ -160,26 +244,93 @@ with tab_ask:
         for m in messages:
             with st.chat_message(m["role"]):
                 st.markdown(m["content"])
+                if m.get("meta"):
+                    st.caption(m["meta"])
                 if m.get("sources"):
                     render_sources(m["sources"])
 
     question = st.chat_input("Ask a question about your documents", disabled=not docs)
     if question:
+        question = redact_question(question)  # PII never shown back or saved
         messages.append({"role": "user", "content": question})
         with chat:
             with st.chat_message("user"):
                 st.markdown(question)
             with st.chat_message("assistant"):
-                with st.spinner("Retrieving and generating…"):
+                with st.spinner("Checking intent, then retrieving and generating…"):
                     # Built per question so the retriever sees freshly indexed files.
-                    result = build_chain(cached_llm()).invoke(question)
+                    result = build_guarded_chain(cached_llm()).invoke(question)
                 sources = [
                     {"label": source_label(d.metadata), "text": d.page_content}
                     for d in result["context"]
                 ]
+                intent = result.get("intent")
                 st.markdown(result["answer"])
-                render_sources(sources)
-        messages.append({"role": "assistant", "content": result["answer"], "sources": sources})
+                meta_line = answer_meta(result)
+                if meta_line:
+                    st.caption(meta_line)
+                if result.get("web_error"):
+                    st.warning(f"Web search failed: {result['web_error']}")
+                if sources:
+                    render_sources(sources)
+        messages.append({
+            "role": "assistant",
+            "content": result["answer"],
+            "sources": sources,
+            "meta": meta_line,
+        })
+        add_exchange(st.session_state.chat_id, question, result["answer"], meta_line, sources)
+
+# ---------- history ----------
+
+with tab_history:
+    chats = list_chats()
+    head, b_each, b_all = st.columns([4, 1.6, 1.6])
+    head.subheader("Chat history")
+    head.caption("Stored with LangChain `SQLChatMessageHistory`. Questions are saved "
+                 "with personal data redacted. Summaries use the local model.")
+    pending = [c for c in chats if not c["has_summary"]]
+    if b_each.button(f"📝 Summarize each chat ({len(pending)} new)", disabled=not pending,
+                     width="stretch"):
+        bar = st.progress(0.0)
+        for i, c in enumerate(pending, 1):
+            bar.progress((i - 1) / len(pending), text=f"Summarizing {i}/{len(pending)}: {c['title']}")
+            summarize_chat(c["id"], cached_llm())
+        bar.empty()
+        st.rerun()
+    if b_all.button("🗂 Overview of all chats", disabled=len(chats) < 2, width="stretch"):
+        with st.spinner("Summarizing each chat, then combining…"):
+            st.session_state.history_overview = summarize_all(cached_llm())["overview"]
+        st.rerun()
+
+    if overview := st.session_state.get("history_overview"):
+        with st.container(border=True):
+            st.markdown("**Overview of all chats**")
+            st.markdown(overview)
+
+    if not chats:
+        st.info("No saved chats yet. Ask a question in the **Ask** tab to start one.")
+    for c in chats:
+        when = c["updated"][:16].replace("T", " ")
+        with st.container(border=True):
+            top, b_sum, b_open = st.columns([6, 1.2, 1])
+            top.markdown(f"**{c['title']}**  \n{when} · {c['n_messages'] // 2} questions")
+            if b_sum.button("Re-summarize" if c["has_summary"] else "Summarize",
+                            key=f"sum-{c['id']}", width="stretch"):
+                with st.spinner("Summarizing…"):
+                    summarize_chat(c["id"], cached_llm(), force=c["has_summary"])
+                st.rerun()
+            if b_open.button("Open", key=f"hist-open-{c['id']}", width="stretch"):
+                st.session_state.chat_id = c["id"]
+                st.session_state.messages = load_messages(c["id"])
+                st.rerun()
+            if c["has_summary"]:
+                st.markdown(c["summary"])
+            elif c["summary"]:
+                st.caption("Summary is out of date (new messages since):")
+                st.markdown(c["summary"])
+            else:
+                st.caption("Not summarized yet.")
 
 # ---------- documents ----------
 
@@ -190,7 +341,10 @@ with tab_docs:
     for d in docs:
         pages = f" · {d['pages']} pages" if d["pages"] else ""
         with st.expander(f"**{d['name']}** — {d['chunks']} chunks{pages}"):
-            st.caption(d["source"])
+            if d.get("origin") == "web":
+                st.markdown(f"[{d['source']}]({d['source']})")
+            else:
+                st.caption(d["source"])
             if st.button("Remove document", key=f"del-{d['source']}", type="secondary"):
                 remove_source(d["source"])
                 st.rerun()

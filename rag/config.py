@@ -23,6 +23,24 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
 TOP_K = int(os.getenv("TOP_K", "4"))
 SEARCH_TYPE = os.getenv("SEARCH_TYPE", "similarity")  # "similarity" or "mmr"
 
+# Intent gate (Ollama): only AI-related questions reach retrieval
+INTENT_ENABLED = os.getenv("INTENT_ENABLED", "true").lower() == "true"
+INTENT_MODEL = os.getenv("INTENT_MODEL", "llama3.2:3b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# Web fallback: search online when the local store can't answer
+WEB_FALLBACK = os.getenv("WEB_FALLBACK", "true").lower() == "true"
+WEB_MIN_SCORE = float(os.getenv("WEB_MIN_SCORE", "0.25"))  # below this, skip local
+WEB_MAX_RESULTS = int(os.getenv("WEB_MAX_RESULTS", "5"))
+WEB_FETCH_PAGES = int(os.getenv("WEB_FETCH_PAGES", "3"))
+WEB_TIMEOUT = float(os.getenv("WEB_TIMEOUT", "10"))
+WEB_STORE = os.getenv("WEB_STORE", "true").lower() == "true"  # save web passages to Chroma
+WEB_STORE_MIN_SCORE = float(os.getenv("WEB_STORE_MIN_SCORE", "0.45"))  # only save on-topic passages
+
+# Chat history: LangChain SQLChatMessageHistory. Any SQLAlchemy URL works;
+# default is a local SQLite file (gitignored).
+CHAT_DB_URL = os.getenv("CHAT_DB_URL", f"sqlite:///{ROOT / 'chats' / 'history.sqlite'}")
+
 # Evaluation
 EVAL_DATASET = Path(os.getenv("EVAL_DATASET", ROOT / "eval" / "dataset.jsonl"))
 EVAL_RESULTS_DIR = Path(os.getenv("EVAL_RESULTS_DIR", ROOT / "eval" / "results"))

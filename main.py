@@ -1,4 +1,4 @@
-"""CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench"""
+"""CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize"""
 import argparse
 import sys
 from pathlib import Path
@@ -7,12 +7,31 @@ from rag import config
 
 
 def print_result(result: dict) -> None:
+    intent = result.get("intent")
+    tags = []
+    if intent:
+        tags.append(f"intent: {intent.category}")
+    if result.get("origin"):
+        tags.append(f"answered from: {result['origin']}")
+    if tags:
+        print(f"\n[{' | '.join(tags)}]")
+    if result.get("pii_redacted"):
+        print(f"[redacted before use: {', '.join(result['pii_redacted'])}]")
+    if result.get("web_error"):
+        print(f"[web search failed: {result['web_error']}]")
+    if result.get("stored"):
+        print(f"[saved {result['stored']} web passages to the knowledge base]")
     print(f"\n{result['answer']}\n")
+    if intent and intent.error:
+        print(f"Intent error: {intent.error}\n", file=sys.stderr)
+    if not result["context"]:
+        return
     print("Sources:")
     for i, d in enumerate(result["context"], start=1):
         page = d.metadata.get("page")
         loc = f", page {page + 1}" if page is not None else ""
-        print(f"  [{i}] {d.metadata.get('source', 'unknown')}{loc}")
+        title = f"{d.metadata['title']} — " if d.metadata.get("title") else ""
+        print(f"  [{i}] {title}{d.metadata.get('source', 'unknown')}{loc}")
     print()
 
 
@@ -35,6 +54,12 @@ def main() -> int:
     ev.add_argument("--temperature", type=float, default=0.7)
     ev.add_argument("--top-k", type=int, default=None, help="Chunks to retrieve")
     ev.add_argument("--limit", type=int, default=None, help="Only the first N questions")
+    sub.add_parser("chats", help="List saved chats")
+    summ = sub.add_parser("summarize", help="Summarize each saved chat with the local LLM")
+    summ.add_argument("chat_id", nargs="?", help="One chat id (default: every chat)")
+    summ.add_argument("--limit", type=int, default=None, help="Only the N most recent chats")
+    summ.add_argument("--overview", action="store_true", help="Also combine into one overview")
+    sub.add_parser("eval-intent", help="Measure the Ollama intent gate on labeled queries")
     bench = sub.add_parser("bench", help="Run and compare eval variants from an experiments file")
     bench.add_argument("--config", type=Path, default=config.ROOT / "eval" / "experiments.json")
     bench.add_argument("--only", default=None, help="Comma-separated variant names")
@@ -46,6 +71,46 @@ def main() -> int:
         from rag.ingest import ingest
 
         ingest(rebuild=args.rebuild)
+        return 0
+
+    if args.cmd == "chats":
+        from rag.history import list_chats
+
+        chats = list_chats()
+        if not chats:
+            print("No saved chats yet.")
+        for c in chats:
+            mark = " (summarized)" if c["has_summary"] else ""
+            print(f"  {c['id']}  {c['updated'][:16].replace('T', ' ')}  "
+                  f"{c['n_messages'] // 2:>3} questions  {c['title']}{mark}")
+        return 0
+
+    if args.cmd == "summarize":
+        from rag.chain import get_llm
+        from rag.history import summarize_all, summarize_chat, summarize_each
+
+        llm = get_llm()
+        if args.chat_id:
+            print(f"\n{summarize_chat(args.chat_id, llm)}\n")
+            return 0
+        progress = lambda i, n, t: print(f"  summarizing {i}/{n}: {t}", file=sys.stderr)  # noqa: E731
+        if args.overview:
+            result = summarize_all(llm, limit=args.limit or 10, progress=progress)
+            chats, overview = result["chats"], result["overview"]
+        else:
+            chats, overview = summarize_each(llm, limit=args.limit, progress=progress), None
+        for c in chats:
+            print(f"\n=== {c['title']}  ({c['id']}, {c['updated'][:16].replace('T', ' ')})")
+            print(c["summary"])
+        if overview:
+            print(f"\n=== Overview of all chats\n{overview}")
+        print()
+        return 0
+
+    if args.cmd == "eval-intent":
+        from rag.eval.intent_eval import run_intent_eval
+
+        run_intent_eval()
         return 0
 
     if args.cmd == "add":
@@ -90,15 +155,18 @@ def main() -> int:
         print_report(summary)
         return 0
 
-    from rag.chain import build_chain
+    from rag.chain import build_guarded_chain
 
-    chain = build_chain()
+    chain = build_guarded_chain()
 
     if args.cmd == "ask":
         print_result(chain.invoke(args.question))
         return 0
 
-    print("Type a question (or 'exit').")
+    from rag.history import add_exchange, new_chat_id, redact_question
+
+    chat_id = new_chat_id()
+    print(f"Type a question (or 'exit'). Chat id: {chat_id}")
     while True:
         try:
             q = input("> ").strip()
@@ -107,7 +175,9 @@ def main() -> int:
             return 0
         if q.lower() in {"exit", "quit", ""}:
             return 0
-        print_result(chain.invoke(q))
+        result = chain.invoke(q)
+        print_result(result)
+        add_exchange(chat_id, redact_question(q), result["answer"])
 
 
 if __name__ == "__main__":

@@ -7,3 +7,15 @@
 {"id": "hallucination_cause", "question": "Why might a model hallucinate in a RAG system?", "reference": "Without an answer only from context instruction, models may hallucinate.", "must_include": ["context"], "evidence": ["models may hallucinate"]}
 {"id": "unans_reranker", "question": "Which reranker model does the system use?", "answerable": false}
 {"id": "unans_price", "question": "How much does it cost per month to run this RAG system in production?", "answerable": false}
+{"id": "cosine_range", "question": "What is the range of cosine similarity?", "reference": "Cosine similarity ranges from -1 to 1.", "must_include": ["1"], "evidence": ["It ranges from -1 to 1"]}
+{"id": "vector_bytes", "question": "How many bytes does a 384-dimensional float32 vector need?", "reference": "1,536 bytes.", "must_include": ["1536"], "evidence": ["384-dimensional vector needs 1,536"]}
+{"id": "mixed_models", "question": "What must you do if you change the embedding model?", "reference": "You must re-embed the whole corpus.", "must_include": ["re embed"], "evidence": ["re-embed the whole corpus"]}
+{"id": "hnsw_name", "question": "What does HNSW stand for?", "reference": "Hierarchical Navigable Small World.", "must_include": ["hierarchical navigable small world"], "evidence": ["Hierarchical Navigable Small World"]}
+{"id": "hnsw_cost", "question": "What is the main cost of an HNSW index?", "reference": "Memory use, because it keeps its graph in memory.", "must_include": ["memory"], "evidence": ["keeps its graph in"]}
+{"id": "duplicates", "question": "What happens if you re-ingest a file without stable ids?", "reference": "It adds duplicate chunks, which crowd out other results in the top-k.", "must_include": ["duplicate"], "evidence": ["adds duplicate chunks"]}
+{"id": "recursive_order", "question": "In what order does recursive chunking try separators?", "reference": "Paragraph breaks first, then line breaks, then spaces.", "must_include": ["paragraph", "line", "spaces"], "evidence": ["paragraph breaks first"]}
+{"id": "parent_doc", "question": "How does the parent document pattern work?", "reference": "It searches over small chunks but passes the larger section around each match to the model.", "must_include": ["small", "larger"], "evidence": ["parent document pattern"]}
+{"id": "faithful_wrong", "question": "Can an answer be faithful and still wrong?", "reference": "Yes, an answer can be faithful and still wrong if the context itself was wrong.", "must_include": ["context"], "evidence": ["faithful and still wrong"]}
+{"id": "pass_trend", "question": "How do pass@k and pass^k change as k grows?", "reference": "pass@k rises as k grows, while pass^k falls.", "must_include": ["rises", "falls"], "evidence": ["rises as k grows"]}
+{"id": "unans_gpu", "question": "Which GPU model is recommended for serving this vector database?", "answerable": false}
+{"id": "unans_author", "question": "Who invented the HNSW algorithm and in what year?", "answerable": false}
