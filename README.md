@@ -222,7 +222,10 @@ path ("Vector Databases > Exact and approximate search"). Inside a section,
 whole paragraphs are packed up to `CHUNK_SIZE` characters; code blocks and
 tables stay whole; long paragraphs split at sentence boundaries; PDF pages are
 sections. A chunk never crosses a section and there is no overlap, so editing
-one paragraph changes only the chunk(s) of its own section.
+one paragraph changes only the chunk(s) of its own section. Structure-aware
+chunks average about 400 characters (2.5x smaller than the old fixed-size
+chunks), so `TOP_K` defaults to 8 to keep a similar amount of context; at 4,
+retrieval recall on the main question set fell to 0.82.
 
 **Content-addressed chunks.** A chunk's id is a hash of its document and text.
 When a file changes, unchanged chunks keep their id and embedding and only new
@@ -488,7 +491,7 @@ Each run writes `per_question.jsonl` and `summary.json` under `eval/results/`.
 | `EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` |
 | `CHUNK_SIZE` | `1000` (max characters per chunk; structure-aware, no overlap) |
 | `GC_GRACE_SECONDS` / `GC_STALE_BUILD_SECONDS` | `5` / `3600` |
-| `TOP_K` / `SEARCH_TYPE` | `4` / `similarity` (or `mmr`) |
+| `TOP_K` / `SEARCH_TYPE` | `8` / `similarity` (or `mmr`) |
 | `RETRIEVAL_MODE` / `GRAPH_K` | `hybrid` (or `vector`, `graph`) / `2` |
 | `GRAPH_ENABLED` / `GRAPH_MODEL` | `true` / `llama3.2:3b` |
 | `RERANK` / `RERANK_FETCH_K` / `RERANK_MODEL` | `false` / `20` / `cross-encoder/ms-marco-MiniLM-L-6-v2` |

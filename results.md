@@ -270,3 +270,27 @@ Run on 2026-11-07 with hybrid retrieval, 3 sampled answers per question, and the
   scored 8/8 on a labeled sanity set, and refusals are graded by rule.
 - **Caveats:** 10-21 questions x 3 samples, so differences of a few points are noise.
 
+## Structure-aware chunking and TOP_K (`bench --config eval/experiments_chunking.json`)
+
+Run on 2026-11-07 after re-ingesting with stable, structure-aware chunks (45 file chunks averaging
+393 characters, versus 21 fixed-size chunks of up to 1,000 characters with 150 overlap before),
+hybrid retrieval, 3 sampled answers per question.
+
+| Questions | TOP_K | Accuracy | pass@3 | pass^3 | Retrieval P | Retrieval R | MRR | Faithfulness | Hallucination | Abstention F1 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Original 21 | 4 | 0.651 | 0.714 | 0.571 | 0.185 | 0.824 | 0.755 | 0.854 | 0.241 | 0.737 |
+| Original 21 | 6 | 0.667 | 0.762 | 0.524 | 0.147 | 0.882 | 0.767 | 0.783 | 0.241 | 0.857 |
+| Original 21 | **8** | **0.714** | **0.857** | 0.524 | 0.126 | **1.000** | 0.782 | 0.807 | 0.250 | 0.857 |
+| Relational 10 | 8 | 0.767 | 0.900 | 0.500 | 0.205 | 1.000 | 0.900 | 0.633 | 0.552 | – |
+| Follow-ups 10 | 8 | 0.800 | 0.900 | 0.700 | 0.126 | 1.000 | 0.950 | 0.642 | 0.385 | – |
+
+- **Smaller chunks need a larger TOP_K:** at 4, three questions lost their evidence chunk (ranked 5th,
+  7th and 8th), dropping recall to 0.82. At 8, every evidence chunk is retrieved (17/17) and
+  accuracy (0.714) matches the old fixed-size chunking (0.698-0.714). TOP_K now defaults to 8.
+- **Relational questions are unchanged** (0.767), and follow-ups stay high (0.80 at TOP_K 8; 0.90 in
+  an earlier run at TOP_K 4, a difference within noise for 10 questions).
+- **Trade-off:** more context lowers faithfulness slightly (0.85 at TOP_K 4 to 0.81 at 8) and lowers
+  retrieval precision, since more of the 8 chunks are off-topic.
+- **What the new chunking buys:** editing one paragraph re-embeds only that section's chunk, and
+  versions switch atomically with old versions garbage-collected in the background (see README).
+
