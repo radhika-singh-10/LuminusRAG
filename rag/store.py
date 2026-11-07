@@ -25,10 +25,17 @@ def get_vectorstore() -> Chroma:
 
 
 def get_retriever(k: int | None = None):
+    """Vector retriever, wrapped with knowledge-graph context when
+    RETRIEVAL_MODE is "graph" or "hybrid" (see rag/graph.py)."""
     k = k or config.TOP_K
     search_kwargs = {"k": k}
     if config.SEARCH_TYPE == "mmr":
         search_kwargs["fetch_k"] = max(20, k * 4)
-    return get_vectorstore().as_retriever(
+    vector = get_vectorstore().as_retriever(
         search_type=config.SEARCH_TYPE, search_kwargs=search_kwargs
     )
+    if config.RETRIEVAL_MODE in ("graph", "hybrid"):
+        from .graph import HybridRetriever
+
+        return HybridRetriever(vector=vector, mode=config.RETRIEVAL_MODE)
+    return vector

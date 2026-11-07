@@ -1,4 +1,4 @@
-# Evaluation Results
+# LuminusRAG: Evaluation Results
 
 Run on 2026-11-07 with `python main.py eval -n 5 -k 1,3,5`, `python main.py eval-intent`, and `python main.py bench`.
 
@@ -211,4 +211,30 @@ techniques). Web fallback was off.
 - **Low faithfulness on direct benign questions (about 0.4)** is expected here: with web search
   off, general questions such as "What is differential privacy?" have no supporting documents,
   so the model answers from its own knowledge.
+
+## GraphRAG comparison (`bench --config eval/experiments_graph.json`)
+
+Run on 2026-11-07, 3 sampled answers per question at temperature 0.7. The knowledge graph had
+223 entities and 76 relations extracted from 36 chunks by `llama3.2:3b`.
+"Relational" is `eval/graph_dataset.jsonl`: 10 questions whose answers link facts across chunks
+or documents (for example the embedding model in one document and its vector size in another).
+
+| Questions | Retrieval | Accuracy | pass@3 | pass^3 | Retrieval P | Retrieval R | MRR | Faithfulness | Hallucination |
+|---|---|---|---|---|---|---|---|---|---|
+| Original 21 | vector | 0.730 | 0.905 | 0.619 | 0.265 | 1.000 | 0.789 | 0.885 | 0.217 |
+| Original 21 | hybrid | 0.714 | 0.857 | 0.571 | 0.240 | 1.000 | 0.789 | 0.881 | 0.180 |
+| Relational 10 | vector | 0.700 | 0.900 | 0.500 | 0.400 | 1.000 | 0.900 | 0.585 | 0.655 |
+| Relational 10 | **hybrid** | **0.833** | **1.000** | **0.700** | 0.383 | 1.000 | 0.900 | 0.577 | 0.560 |
+| Relational 10 | graph only | 0.600 | 0.700 | 0.500 | 0.433 | 0.700 | 0.533 | 0.570 | 0.500 |
+
+- **Hybrid helps on relational questions:** +13 points accuracy and +20 points pass^3 over vector
+  search, with fewer hallucinations.
+- **No loss on ordinary questions:** on the original set hybrid is within noise of vector search
+  (0.71 vs 0.73), hallucinates less (0.18 vs 0.22), and abstains better ("I don't know" F1 0.73 vs 0.53).
+- **Graph-only is not enough:** it misses chunks the graph did not capture (recall 0.70).
+- **Caveats:** samples are small (10-21 questions x 3), so differences of a few points are noise.
+  Faithfulness is lower on relational questions for every mode because answers combine facts
+  from several chunks, which the sentence-level NLI check rarely sees in one passage. The 3B
+  extractor also makes some wrong relations (for example `RLHF --developed_by--> Google`).
+  Hybrid is now the default (`RETRIEVAL_MODE=hybrid`).
 

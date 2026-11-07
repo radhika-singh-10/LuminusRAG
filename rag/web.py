@@ -30,7 +30,7 @@ from . import config
 from .safety import looks_like_injection, redact_pii, strip_redactions
 from .store import get_embeddings, get_vectorstore
 
-USER_AGENT = "Mozilla/5.0 (compatible; rag-langchain/1.0)"
+USER_AGENT = "Mozilla/5.0 (compatible; LuminusRAG/1.0)"
 MAX_BYTES = 2_000_000
 MAX_CHUNKS_PER_PAGE = 40
 MAX_REDIRECTS = 3
@@ -223,4 +223,11 @@ def store_web_documents(docs: list[Document], query: str) -> int:
         digest = hashlib.sha256(f"{meta['source']}\n{doc.page_content}".encode()).hexdigest()
         ids.append(f"web-{digest[:32]}")
     get_vectorstore().add_documents(to_store, ids=ids)
+    if config.GRAPH_ENABLED:
+        try:
+            from .graph import update_graph
+
+            update_graph()
+        except Exception:  # graph is optional; answering already succeeded
+            pass
     return len(to_store)

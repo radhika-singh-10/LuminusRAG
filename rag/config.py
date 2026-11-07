@@ -23,6 +23,12 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
 TOP_K = int(os.getenv("TOP_K", "4"))
 SEARCH_TYPE = os.getenv("SEARCH_TYPE", "similarity")  # "similarity" or "mmr"
 
+# GraphRAG: knowledge graph extracted from chunks by an Ollama model
+RETRIEVAL_MODE = os.getenv("RETRIEVAL_MODE", "hybrid")  # "vector", "graph", or "hybrid"
+GRAPH_ENABLED = os.getenv("GRAPH_ENABLED", "true").lower() == "true"  # keep graph in sync on ingest
+GRAPH_MODEL = os.getenv("GRAPH_MODEL", os.getenv("INTENT_MODEL", "llama3.2:3b"))
+GRAPH_K = int(os.getenv("GRAPH_K", "2"))  # extra chunks contributed by the graph
+
 # Intent gate (Ollama): only AI-related questions reach retrieval
 INTENT_ENABLED = os.getenv("INTENT_ENABLED", "true").lower() == "true"
 INTENT_MODEL = os.getenv("INTENT_MODEL", "llama3.2:3b")

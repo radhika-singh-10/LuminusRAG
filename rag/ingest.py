@@ -232,6 +232,14 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
             stats["removed_files"] += 1
             emit("removed", {"source": source})
 
+    if config.GRAPH_ENABLED and (stats["chunks_written"] or stats["removed_files"]
+                                  or stats["updated_files"] or rebuild):
+        from .graph import update_graph
+
+        emit("graph", {"message": "Updating knowledge graph…"})
+        stats["graph"] = update_graph(
+            progress=lambda i, n: emit("graph_progress", {"done": i, "total": n}))
+
     total = len(store.get(include=[])["ids"])
     print(
         f"Index synced: +{stats['added_files']} new, ~{stats['updated_files']} updated, "

@@ -1,4 +1,4 @@
-"""CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security"""
+"""LuminusRAG CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security | graph"""
 import argparse
 import sys
 from pathlib import Path
@@ -55,7 +55,7 @@ def print_result(result: dict, answer_shown: bool = False) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="LangChain RAG demo")
+    parser = argparse.ArgumentParser(description="LuminusRAG: guarded GraphRAG for AI questions")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     ing = sub.add_parser("ingest", help=f"Sync the index with files in {config.DATA_DIR}")
@@ -73,6 +73,9 @@ def main() -> int:
     ev.add_argument("--temperature", type=float, default=0.7)
     ev.add_argument("--top-k", type=int, default=None, help="Chunks to retrieve")
     ev.add_argument("--limit", type=int, default=None, help="Only the first N questions")
+    gr = sub.add_parser("graph", help="Knowledge graph: build, stats, or show an entity")
+    gr.add_argument("action", choices=["build", "rebuild", "stats", "show"])
+    gr.add_argument("entity", nargs="?", help="Entity name for 'show'")
     sub.add_parser("chats", help="List saved chats")
     summ = sub.add_parser("summarize", help="Summarize each saved chat with the local LLM")
     summ.add_argument("chat_id", nargs="?", help="One chat id (default: every chat)")
@@ -97,6 +100,25 @@ def main() -> int:
         from rag.ingest import ingest
 
         ingest(rebuild=args.rebuild)
+        return 0
+
+    if args.cmd == "graph":
+        from rag.graph import graph_context, graph_stats, update_graph
+
+        if args.action in ("build", "rebuild"):
+            update_graph(rebuild=args.action == "rebuild",
+                         progress=lambda i, n: print(f"\r  extracting {i}/{n}", end="", flush=True))
+            print()
+        elif args.action == "stats":
+            st_ = graph_stats()
+            print(f"{st_['nodes']} entities, {st_['edges']} relations from {st_['chunks']} chunks")
+            for name, etype, deg in st_["top"]:
+                print(f"  {deg:>3}  {name} ({etype})")
+        else:
+            seeds, facts, chunks = graph_context(args.entity or "")
+            print(f"Matched: {', '.join(seeds) or 'nothing'}")
+            for f_ in facts:
+                print(f"  {f_}")
         return 0
 
     if args.cmd == "chats":

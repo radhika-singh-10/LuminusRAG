@@ -1,4 +1,6 @@
-# RAG with LangChain
+# LuminusRAG
+
+*Guarded, self-evaluating GraphRAG for AI questions.*
 
 Question answering over your own documents using LangChain, a persistent Chroma
 vector store, local HuggingFace embeddings, and either a local Hugging Face LLM
@@ -27,7 +29,7 @@ flowchart TB
         direction LR
         SAFETY["Policy guard<br/>rag/policy.py + policies/*.json<br/>regex + LLM check<br/>reject unsafe · redact PII"]
         INTENT["Intent gate<br/>rag/intent.py<br/>AI questions only<br/>no action requests"]
-        RETR["Retriever<br/>rag/store.py<br/>top-k / MMR"]
+        RETR["Retriever<br/>rag/store.py + rag/graph.py<br/>vector · graph · hybrid"]
         GEN["Answer chain<br/>prompt + LLM<br/>output sanitizer"]
         WEBF["Web fallback<br/>rag/web.py<br/>search · fetch · clean<br/>rank · save"]
         SAFETY --> INTENT --> RETR --> GEN
@@ -41,7 +43,7 @@ flowchart TB
 
     subgraph MODELS["Local models"]
         direction LR
-        OLLAMA["Ollama<br/>llama3.2:3b<br/>policy judge + intent classifier"]
+        OLLAMA["Ollama<br/>llama3.2:3b<br/>policy judge · intent · graph extraction"]
         QWEN["Hugging Face<br/>Qwen2.5-1.5B-Instruct<br/>answer generator"]
         MINILM["all-MiniLM-L6-v2<br/>embeddings (384-d)"]
         NLI["DeBERTa-v3 NLI<br/>truthfulness checks"]
@@ -51,6 +53,7 @@ flowchart TB
         direction LR
         FILES[("data/<br/>your documents<br/>+ uploads/")]
         CHROMA[("Chroma · chroma_db/<br/>file chunks +<br/>saved web passages")]
+        KG[("Knowledge graph<br/>chroma_db/knowledge_graph.json<br/>NetworkX entities + relations")]
         HISTDB[("chats/history.sqlite<br/>LangChain SQLChatMessageHistory<br/>+ per-chat summaries")]
         RESULTS[("eval/results/<br/>run reports")]
     end
@@ -73,6 +76,9 @@ flowchart TB
     SAFETY --- OLLAMA
     LOADER -. "injection / names check" .- OLLAMA
     RETR <--> CHROMA
+    RETR <--> KG
+    CHROMA -- "extract entities<br/>+ relations" --> KG
+    KG --- OLLAMA
     GEN --- QWEN
     GEN -.- CLAUDE
     LOADER & RETR & WEBF --- MINILM
@@ -95,6 +101,7 @@ flowchart TB
 | Generation | `rag/chain.py` + Qwen or Claude | Answer only from the retrieved context, with citations |
 | Web fallback | `rag/web.py` + DuckDuckGo | Search when local data can't answer; clean, rank, and save passages |
 | Chat history | `rag/history.py` + LangChain `SQLChatMessageHistory` | Save every chat, reopen it, and summarize each chat |
+| Knowledge graph | `rag/graph.py` + NetworkX + Ollama | Extract AI entities and relations from chunks; add connected facts and chunks to retrieval (GraphRAG) |
 | Ingestion | `rag/ingest.py` | Load, split, embed, and upsert files; skip unchanged ones |
 | Evaluation | `rag/eval/` | Score retrieval, correctness, consistency, truthfulness, and the intent gate |
 
@@ -103,7 +110,7 @@ Everything runs locally except the web search and, if you choose it, Claude.
 ## Layout
 
 ```
-rag-langchain/
+LuminusRAG/
 ├── app.py               # web UI: upload & process, ask, browse chunks, evaluate
 ├── main.py              # CLI: ingest / add / docs / ask / chat / eval / bench
 ├── rag/
@@ -115,6 +122,7 @@ rag-langchain/
 │   ├── policy.py        # policy guard: regex + LLM checks against policies/*.json
 │   ├── safety.py        # PII detectors, injection rules, output sanitizer
 │   ├── history.py       # chat history (LangChain SQL store) + summaries
+│   ├── graph.py         # GraphRAG: entity/relation extraction, graph store, hybrid retriever
 │   ├── chain.py         # retriever + prompt + LLM (LCEL)
 │   └── eval/
 │       ├── dataset.py   # JSONL eval set loader
@@ -171,6 +179,9 @@ python main.py bench --only baseline,mmr -v
 python main.py eval-intent                     # measure the intent gate
 python main.py eval-guard                      # policy guard on 84 labeled attack/benign questions
 python main.py eval-security -n 3              # full-pipeline PII + prompt-injection eval
+python main.py graph build                     # extract new chunks into the knowledge graph
+python main.py graph stats                     # entity and relation counts, most connected
+python main.py graph show "HNSW"               # facts around an entity
 python main.py chats                           # list saved chats
 python main.py summarize                       # summarize each chat
 python main.py summarize --overview            # ...plus an overview of all chats
@@ -190,6 +201,36 @@ The web UI has four tabs:
 Ingestion is incremental: chunk ids derive from each file's content hash, so
 unchanged files are skipped, edited files are re-embedded, and deleted files
 are removed from the index.
+
+## GraphRAG (knowledge graph)
+
+Vector search finds chunks that look like the question. A knowledge graph adds
+what is *connected* to the things the question names, which helps when an
+answer spans several chunks or documents (HNSW → ANN index → vector database
+→ Chroma).
+
+- **Build:** an Ollama model reads each stored chunk and extracts AI entities
+  (concepts, models, techniques, metrics, tools, benchmarks, ...) and relations
+  (`is_a`, `uses`, `stores`, `alternative_to`, ...). Entities must appear in
+  the chunk text, relations must join two entities named in the same
+  sentence, generic words and PII are dropped, and every node and edge keeps
+  the ids of the chunks it came from. Chunks are already policy-sanitized, so
+  injected text never reaches the graph.
+- **Store:** a NetworkX graph in `chroma_db/knowledge_graph.json`, updated
+  incrementally after `ingest`, after uploads, and when web passages are
+  saved; facts from deleted chunks are removed.
+- **Retrieve:** `RETRIEVAL_MODE=vector` (vector search only), `graph`
+  (graph only, falling back to vector), or `hybrid` (vector results plus up
+  to `GRAPH_K` chunks linked to the question's entities and a list of the
+  connecting facts).
+- **Browse:** the **Graph** tab in the web UI shows the most connected
+  entities and draws the neighbourhood of any entity.
+
+Hybrid is the default: on 10 relational questions it raised accuracy from
+0.70 to 0.83 and pass^3 from 0.50 to 0.70 compared with vector search, and on
+the original 21 questions it was on par (0.71 vs 0.73) with fewer
+hallucinations. Graph-only retrieval was worse (0.60), because chunks the
+graph did not capture are missed. See [results.md](results.md).
 
 ## Streaming
 
@@ -343,6 +384,8 @@ Each run writes `per_question.jsonl` and `summary.json` under `eval/results/`.
 | `EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `150` |
 | `TOP_K` / `SEARCH_TYPE` | `4` / `similarity` (or `mmr`) |
+| `RETRIEVAL_MODE` / `GRAPH_K` | `hybrid` (or `vector`, `graph`) / `2` |
+| `GRAPH_ENABLED` / `GRAPH_MODEL` | `true` / `llama3.2:3b` |
 | `INTENT_ENABLED` / `INTENT_MODEL` | `true` / `llama3.2:3b` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` |
 | `WEB_FALLBACK` / `WEB_MIN_SCORE` | `true` / `0.25` |

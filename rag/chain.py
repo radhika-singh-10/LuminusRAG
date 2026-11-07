@@ -35,6 +35,9 @@ def format_docs(docs: list[Document]) -> str:
         src = d.metadata.get("source", "unknown")
         page = d.metadata.get("page")
         title = d.metadata.get("title")
+        if d.metadata.get("origin") == "graph":
+            blocks.append(f"[{i}] knowledge graph\n{d.page_content}")
+            continue
         label = (f"{title} — " if title else "") + f"{src}"
         label += f" (page {page + 1})" if page is not None else ""
         blocks.append(f"[{i}] {label}\n{d.page_content}")

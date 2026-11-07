@@ -1,4 +1,4 @@
-"""Web UI: upload documents, watch them get processed, ask questions, run evals.
+"""LuminusRAG web UI: upload documents, watch them get processed, ask questions, run evals.
 
 Run:  streamlit run app.py
 """
@@ -16,7 +16,7 @@ from rag.history import (
 )
 from rag.ingest import get_chunks, ingest, list_indexed, remove_source, save_upload
 
-st.set_page_config(page_title="Document Q&A", page_icon="📄", layout="wide")
+st.set_page_config(page_title="LuminusRAG", page_icon="✨", layout="wide")
 
 
 @st.cache_resource(show_spinner="Loading language model…")
@@ -25,6 +25,8 @@ def cached_llm():
 
 
 def source_label(meta: dict) -> str:
+    if meta.get("origin") == "graph":
+        return "🕸 Knowledge graph facts"
     if meta.get("origin") == "web":
         return f"🌐 [{meta.get('title') or meta['source']}]({meta['source']})"
     name = Path(meta.get("source", "unknown")).name
@@ -105,6 +107,12 @@ def process_uploads(files) -> None:
                 )
             elif event == "stored":
                 st.write(f"✅ `{name}` indexed in {info['seconds']}s")
+            elif event == "graph":
+                st.write("**5. Knowledge graph** — extracting entities and relations from new chunks")
+                bars["__graph__"] = st.progress(0.0, text="Updating knowledge graph…")
+            elif event == "graph_progress":
+                bars["__graph__"].progress(info["done"] / info["total"],
+                                           text=f"Knowledge graph: {info['done']}/{info['total']} chunks")
             elif event == "removed":
                 st.write(f"🗑 `{name}` no longer in data folder, removed from index")
 
@@ -129,7 +137,8 @@ def process_uploads(files) -> None:
 
 docs = indexed_docs()
 with st.sidebar:
-    st.header("📄 Document Q&A")
+    st.header("✨ LuminusRAG")
+    st.caption("Guarded GraphRAG for AI questions")
     total_chunks = sum(d["chunks"] for d in docs)
     c1, c2 = st.columns(2)
     c1.metric("Documents", len(docs))
@@ -174,8 +183,8 @@ with st.sidebar:
                 st.session_state.messages = []
             st.rerun()
 
-tab_upload, tab_ask, tab_history, tab_docs, tab_eval = st.tabs(
-    ["📤 Upload & process", "💬 Ask", "🗂 History", "📚 Documents", "📊 Evaluate"]
+tab_upload, tab_ask, tab_history, tab_docs, tab_graph, tab_eval = st.tabs(
+    ["📤 Upload & process", "💬 Ask", "🗂 History", "📚 Documents", "🕸 Graph", "📊 Evaluate"]
 )
 
 # ---------- upload & process ----------
@@ -386,6 +395,49 @@ with tab_docs:
                 where = f"page {c['page'] + 1} · " if c["page"] is not None else ""
                 st.markdown(f"**Chunk {c['index']}** · {where}{len(c['text'])} chars")
                 st.text(c["text"])
+
+# ---------- knowledge graph ----------
+
+with tab_graph:
+    from rag.graph import graph_stats, load_graph, to_dot, update_graph
+
+    head, b_build = st.columns([5, 1.5])
+    head.subheader("Knowledge graph")
+    head.caption(f"Entities and relations extracted from your chunks by `{config.GRAPH_MODEL}`. "
+                 f"Retrieval mode: **{config.RETRIEVAL_MODE}** (set `RETRIEVAL_MODE` to "
+                 "`vector`, `graph` or `hybrid`).")
+    if b_build.button("Update graph", width="stretch"):
+        bar = st.progress(0.0, text="Extracting…")
+        update_graph(progress=lambda i, n: bar.progress(i / n, text=f"Extracting {i}/{n} chunks"))
+        bar.empty()
+        st.rerun()
+
+    gs = graph_stats(top=20)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Entities", gs["nodes"])
+    c2.metric("Relations", gs["edges"])
+    c3.metric("Chunks read", gs["chunks"])
+    if not gs["nodes"]:
+        st.info("The graph is empty. Click **Update graph** to build it.")
+    else:
+        g, _ = load_graph()
+        names = sorted({d["name"] for _, d in g.nodes(data=True)}, key=str.lower)
+        top_names = [n for n, _, _ in gs["top"]]
+        left, right = st.columns([1, 3])
+        with left:
+            st.markdown("**Most connected**")
+            st.dataframe(pd.DataFrame(gs["top"], columns=["entity", "type", "links"]),
+                         hide_index=True, width="stretch", height=420)
+        with right:
+            entity = st.selectbox("Explore an entity", names,
+                                  index=names.index(top_names[0]) if top_names else 0)
+            st.graphviz_chart(to_dot(entity), width="stretch")
+            from rag.graph import graph_context
+
+            seeds, facts, _ = graph_context(entity)
+            if facts:
+                with st.expander(f"Facts about {entity} ({len(facts)})"):
+                    st.text("\n".join(facts))
 
 # ---------- evaluate ----------
 
