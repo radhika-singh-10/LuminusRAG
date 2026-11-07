@@ -29,6 +29,11 @@ GRAPH_ENABLED = os.getenv("GRAPH_ENABLED", "true").lower() == "true"  # keep gra
 GRAPH_MODEL = os.getenv("GRAPH_MODEL", os.getenv("INTENT_MODEL", "llama3.2:3b"))
 GRAPH_K = int(os.getenv("GRAPH_K", "2"))  # extra chunks contributed by the graph
 
+# Versioned ingestion: new document versions go live atomically; old versions
+# are garbage-collected in the background after a grace period.
+GC_GRACE_SECONDS = float(os.getenv("GC_GRACE_SECONDS", "5"))
+GC_STALE_BUILD_SECONDS = float(os.getenv("GC_STALE_BUILD_SECONDS", "3600"))
+
 # Reranking: fetch more candidates, keep the TOP_K a cross-encoder scores best
 RERANK = os.getenv("RERANK", "false").lower() == "true"
 RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")

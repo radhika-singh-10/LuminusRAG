@@ -38,7 +38,7 @@ flowchart TB
     end
 
     subgraph INGEST["Ingestion · rag/ingest.py"]
-        LOADER["Load PDF / TXT / MD<br/>policy-sanitize (drop injection,<br/>redact PII) · split · hash"]
+        LOADER["Load PDF / TXT / MD<br/>policy-sanitize · chunk by structure<br/>hash chunks · versioned upsert"]
     end
 
     subgraph MODELS["Local models"]
@@ -52,7 +52,8 @@ flowchart TB
     subgraph STORAGE["Storage"]
         direction LR
         FILES[("data/<br/>your documents<br/>+ uploads/")]
-        CHROMA[("Chroma · chroma_db/<br/>file chunks +<br/>saved web passages")]
+        CHROMA[("Chroma · chroma_db/<br/>content-addressed chunks +<br/>saved web passages")]
+        REG[("Version registry<br/>chroma_db/registry.sqlite<br/>active · building · retired")]
         KG[("Knowledge graph<br/>chroma_db/knowledge_graph.json<br/>NetworkX entities + relations")]
         HISTDB[("chats/history.sqlite<br/>LangChain SQLChatMessageHistory<br/>+ per-chat summaries")]
         RESULTS[("eval/results/<br/>run reports")]
@@ -71,7 +72,11 @@ flowchart TB
     USER --> WEB_UI & CLI
     WEB_UI & CLI -- "question" --> SAFETY
     WEB_UI & CLI -- "upload / add" --> FILES
-    FILES --> LOADER -- "embed + upsert" --> CHROMA
+    FILES --> LOADER -- "embed new chunks only" --> CHROMA
+    LOADER -- "begin → activate version" --> REG
+    REG -. "active chunk set" .-> RETR
+    GCX["Garbage collector<br/>(background thread)"] -- "delete unreferenced chunks" --> CHROMA
+    REG -.-> GCX
     INTENT --- OLLAMA
     SAFETY --- OLLAMA
     LOADER -. "injection / names check" .- OLLAMA
@@ -102,7 +107,7 @@ flowchart TB
 | Web fallback | `rag/web.py` + DuckDuckGo | Search when local data can't answer; clean, rank, and save passages |
 | Chat history | `rag/history.py` + LangChain `SQLChatMessageHistory` | Save every chat, reopen it, and summarize each chat |
 | Knowledge graph | `rag/graph.py` + NetworkX + Ollama | Extract AI entities and relations from chunks; add connected facts and chunks to retrieval (GraphRAG) |
-| Ingestion | `rag/ingest.py` | Load, split, embed, and upsert files; skip unchanged ones |
+| Ingestion | `rag/ingest.py`, `rag/chunking.py`, `rag/versioning.py` | Chunk by structure, hash chunks, embed only changed ones, switch document versions atomically, garbage-collect old versions in the background |
 | Evaluation | `rag/eval/` | Score retrieval, correctness, consistency, truthfulness, and the intent gate |
 
 Everything runs locally except the web search and, if you choose it, Claude.
@@ -116,7 +121,9 @@ LuminusRAG/
 ├── rag/
 │   ├── config.py        # env-driven settings
 │   ├── store.py         # Chroma vector store, embeddings, retriever
-│   ├── ingest.py        # load -> split -> embed -> incremental upsert
+│   ├── ingest.py        # load -> sanitize -> chunk -> versioned, content-addressed upsert
+│   ├── chunking.py      # stable structure-aware chunking (headings, sections, paragraphs)
+│   ├── versioning.py    # version registry, active chunk set, async garbage collector
 │   ├── intent.py        # Ollama intent gate (AI questions only)
 │   ├── web.py           # web fallback: search, fetch, clean, rank, store
 │   ├── policy.py        # policy guard: regex + LLM checks against policies/*.json
@@ -174,6 +181,8 @@ python main.py add report.pdf notes.md         # copy files into data/uploads an
 python main.py docs                            # list indexed documents
 python main.py ingest                          # sync index with data/ (incremental)
 python main.py ingest --rebuild                # drop and rebuild the index
+python main.py versions                        # document versions (active / building / retired)
+python main.py gc                              # garbage-collect retired versions now
 python main.py ask "What are the pipeline stages of RAG?"
 python main.py chat                            # interactive
 python main.py eval -n 5 -k 1,3,5              # evaluate on eval/dataset.jsonl
@@ -201,9 +210,64 @@ The web UI has four tabs:
 - **Evaluate**: run the eval harness and view accuracy, pass@k / pass^k,
   retrieval, truthfulness, and per-question results.
 
-Ingestion is incremental: chunk ids derive from each file's content hash, so
-unchanged files are skipped, edited files are re-embedded, and deleted files
-are removed from the index.
+Ingestion is incremental and versioned: unchanged files are skipped, an edited
+file re-embeds only the chunks that changed, and deleted files are retired and
+cleaned up in the background (see Versioned ingestion).
+
+## Versioned ingestion
+
+**Stable chunking** (`rag/chunking.py`). Chunks follow the document's
+structure: Markdown headings open sections, and each chunk records its heading
+path ("Vector Databases > Exact and approximate search"). Inside a section,
+whole paragraphs are packed up to `CHUNK_SIZE` characters; code blocks and
+tables stay whole; long paragraphs split at sentence boundaries; PDF pages are
+sections. A chunk never crosses a section and there is no overlap, so editing
+one paragraph changes only the chunk(s) of its own section.
+
+**Content-addressed chunks.** A chunk's id is a hash of its document and text.
+When a file changes, unchanged chunks keep their id and embedding and only new
+chunks are embedded. In testing, editing one paragraph of a 4-chunk document
+embedded 1 chunk and reused 3.
+
+**Versions** (`rag/versioning.py`, registry in `chroma_db/registry.sqlite`).
+Each update creates a new document version:
+
+1. **building**: new chunks are written to Chroma and the knowledge graph,
+   but the retriever only serves chunks of *active* versions, so queries keep
+   seeing the previous version.
+2. **active**: when the version is complete, one transaction activates it and
+   retires the previous one. The next query sees the new version; chunks only
+   the old version used are hidden at once.
+3. **garbage collection**: a background thread waits `GC_GRACE_SECONDS` for
+   in-flight queries, then deletes chunks no active or building version uses
+   (from Chroma and the graph), drops retired versions, fails builds that
+   were abandoned for `GC_STALE_BUILD_SECONDS`, and removes chunks from the
+   old unversioned scheme. A failed update leaves the old version live.
+
+Deleting a file retires its document immediately and the GC removes its
+chunks. Web passages are not versioned and are always live.
+
+```mermaid
+sequenceDiagram
+    participant I as Ingest
+    participant C as Chroma
+    participant R as Registry
+    participant Q as Retriever
+    participant G as GC thread
+    I->>R: begin_version(v2) = building
+    I->>C: add only new chunks (reuse unchanged ids)
+    Q->>R: active chunk set → v1
+    Q->>C: search, keep v1 chunks only
+    I->>R: activate(v2), retire(v1) in one transaction
+    Q->>R: active chunk set → v2
+    I-->>G: schedule (after grace period)
+    G->>R: chunks referenced only by retired versions
+    G->>C: delete them (and prune the graph)
+```
+
+CLI: `python main.py versions` (history per document), `python main.py chunks
+data/vector_databases.md` (active chunks with ids and headings), and `python
+main.py gc` (collect now).
 
 ## GraphRAG (knowledge graph)
 
@@ -422,7 +486,8 @@ Each run writes `per_question.jsonl` and `summary.json` under `eval/results/`.
 | `HF_LLM_MODEL` / `HF_MAX_NEW_TOKENS` | `Qwen/Qwen2.5-1.5B-Instruct` / `512` |
 | `ANTHROPIC_API_KEY` / `LLM_MODEL` | only for `anthropic` / `claude-sonnet-4-5` |
 | `EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `150` |
+| `CHUNK_SIZE` | `1000` (max characters per chunk; structure-aware, no overlap) |
+| `GC_GRACE_SECONDS` / `GC_STALE_BUILD_SECONDS` | `5` / `3600` |
 | `TOP_K` / `SEARCH_TYPE` | `4` / `similarity` (or `mmr`) |
 | `RETRIEVAL_MODE` / `GRAPH_K` | `hybrid` (or `vector`, `graph`) / `2` |
 | `GRAPH_ENABLED` / `GRAPH_MODEL` | `true` / `llama3.2:3b` |
@@ -454,11 +519,15 @@ flowchart LR
         UP["Save upload<br/>data/uploads/"] --> LOAD["Load<br/>PyPDFLoader / TextLoader"]
         LOAD --> HASH{"File hash<br/>changed?"}
         HASH -- no --> SKIP["Skip"]
-        HASH -- yes --> SPLIT["Split<br/>RecursiveCharacterTextSplitter<br/>1000 chars / 150 overlap"]
-        SPLIT --> EMB["Embed<br/>all-MiniLM-L6-v2 (384-d)"]
+        HASH -- yes --> SPLIT["Chunk by structure<br/>headings · sections · paragraphs<br/>≤1000 chars, no overlap"]
+        SPLIT --> CH{"Chunk hash<br/>already stored?"}
+        CH -- yes --> REUSE["Reuse id + embedding"]
+        CH -- no --> EMB["Embed<br/>all-MiniLM-L6-v2 (384-d)"]
+        REUSE --> VER["New version: building<br/>→ activate atomically"]
+        EMB --> VER
     end
 
-    DB[("Chroma<br/>chroma_db/<br/>ids = hash-chunk#")]
+    DB[("Chroma<br/>chroma_db/<br/>ids = hash of chunk content")]
 
     subgraph QA["Question answering · rag/chain.py (LCEL)"]
         direction TB
@@ -481,7 +550,7 @@ flowchart LR
 
     WEB -- "upload / add" --> UP
     CLI -- "add / ingest" --> UP
-    EMB -- "upsert" --> DB
+    VER -- "upsert new chunks" --> DB
     SAVE -- "upsert" --> DB
     WEB -- "ask" --> Q
     CLI -- "ask / chat" --> Q

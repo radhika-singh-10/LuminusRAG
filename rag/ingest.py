@@ -1,8 +1,17 @@
-"""Load documents, split into chunks, embed, and upsert into Chroma.
+"""Versioned, content-addressed ingestion.
 
-Ingestion is incremental: every chunk gets a deterministic id derived from the
-file's content hash, so unchanged files are skipped, changed files are
-re-embedded, and files removed from DATA_DIR are deleted from the index.
+For every file in DATA_DIR:
+1. Unchanged files (same file hash as the active version) are skipped.
+2. New or changed files are policy-sanitized and split by structure
+   (headings, sections, paragraphs; see rag/chunking.py).
+3. Each chunk id is a hash of its content, so chunks that did not change keep
+   their id and embedding; only new chunks are embedded.
+4. The chunks form a new document version that stays "building" (invisible to
+   retrieval, which keeps serving the old version) until it is complete,
+   including its knowledge-graph facts. Then it is activated atomically and
+   the previous version is retired.
+5. Deleted files are retired. A background garbage collector later deletes
+   chunks that no live version uses (see rag/versioning.py).
 """
 import hashlib
 import shutil
@@ -12,11 +21,16 @@ from pathlib import Path
 
 from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader, TextLoader
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from . import config
+from . import versioning as V
+from .chunking import chunk_text
 from .policy import sanitize_document
 from .store import get_vectorstore
+
+CHUNKER_VERSION = "structure-v1"
+SUPPORTED = {".pdf", ".txt", ".md"}
+UPLOAD_DIR_NAME = "uploads"
 
 
 def load_documents(data_dir: Path) -> list[Document]:
@@ -39,31 +53,18 @@ def load_documents(data_dir: Path) -> list[Document]:
     return docs
 
 
-def split_documents(docs: list[Document]) -> list[Document]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=config.CHUNK_SIZE,
-        chunk_overlap=config.CHUNK_OVERLAP,
-        add_start_index=True,
-    )
-    return splitter.split_documents(docs)
-
-
 def file_hash(path: str | Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
-    # Chunking settings are part of the hash so changing them re-indexes.
-    h.update(f"|{config.CHUNK_SIZE}|{config.CHUNK_OVERLAP}|{config.EMBED_MODEL}".encode())
-    # Policy changes re-index everything, so stored text always matches current rules.
+    # Chunking settings are part of the hash so changing them creates new versions.
+    h.update(f"|{CHUNKER_VERSION}|{config.CHUNK_SIZE}|{config.EMBED_MODEL}".encode())
+    # Policy changes re-version everything, so stored text always matches current rules.
     for policy in sorted((config.ROOT / "policies").glob("*.json")):
         h.update(policy.read_bytes())
     h.update(f"|guard_llm={config.GUARD_LLM}".encode())
     return h.hexdigest()
-
-
-SUPPORTED = {".pdf", ".txt", ".md"}
-UPLOAD_DIR_NAME = "uploads"
 
 
 def save_upload(name: str, data: bytes) -> Path:
@@ -79,7 +80,7 @@ def save_upload(name: str, data: bytes) -> Path:
 
 
 def add_files(paths: list[str | Path]) -> dict:
-    """Copy files into DATA_DIR/uploads and sync the index (only new/changed files embed)."""
+    """Copy files into DATA_DIR/uploads and sync the index (only new/changed chunks embed)."""
     for p in map(Path, paths):
         if not p.is_file():
             raise FileNotFoundError(p)
@@ -89,60 +90,80 @@ def add_files(paths: list[str | Path]) -> dict:
 
 
 def remove_source(source: str) -> int:
-    """Delete a file from DATA_DIR (or a stored web page) and its chunks from the index.
-    Returns chunks removed."""
+    """Remove a file (retire its document; GC deletes the chunks) or a stored web page.
+    Returns the number of chunks taken out of service."""
+    store = get_vectorstore()
     if source.startswith(("http://", "https://")):
-        store = get_vectorstore()
         ids = store.get(where={"source": source}, include=[])["ids"]
         if ids:
             store.delete(ids=ids)
+            if config.GRAPH_ENABLED:
+                from .graph import prune_chunks
+
+                prune_chunks(set(ids))
         return len(ids)
     path = Path(source).resolve()
     if config.DATA_DIR.resolve() not in path.parents:
         raise ValueError(f"Refusing to delete a file outside {config.DATA_DIR}")
-    store = get_vectorstore()
-    ids = store.get(where={"source": source}, include=[])["ids"]
-    if ids:
-        store.delete(ids=ids)
+    doc_id = V.doc_id_for(source)
+    n = len(V.version_chunks(doc_id))
+    V.retire_document(doc_id)
     path.unlink(missing_ok=True)
-    return len(ids)
+    V.start_gc_async()
+    return n
 
 
 def get_chunks(source: str) -> list[dict]:
-    """Stored chunks of one file, in order: [{index, page, text}]."""
-    data = get_vectorstore().get(where={"source": source}, include=["documents", "metadatas"])
-    rows = [
-        {"index": m.get("chunk_index", 0), "page": m.get("page"), "text": t}
-        for t, m in zip(data["documents"], data["metadatas"])
-    ]
-    return sorted(rows, key=lambda r: r["index"])
+    """Chunks of a file's active version (or a web page), in order:
+    [{index, page, heading, text, chunk_id}]."""
+    store = get_vectorstore()
+    if source.startswith(("http://", "https://")):
+        data = store.get(where={"source": source}, include=["documents", "metadatas"])
+        return [{"index": i, "page": None, "heading": m.get("title", ""), "text": t, "chunk_id": cid}
+                for i, (cid, t, m) in enumerate(zip(data["ids"], data["documents"], data["metadatas"]))]
+    rows = V.version_chunks(V.doc_id_for(source))
+    if not rows:
+        return []
+    data = store.get(ids=[r["chunk_id"] for r in rows], include=["documents"])
+    text = dict(zip(data["ids"], data["documents"]))
+    return [{"index": r["position"], "page": r["page"], "heading": r["heading"] or "",
+             "text": text.get(r["chunk_id"], ""), "chunk_id": r["chunk_id"]} for r in rows]
 
 
 def list_indexed() -> list[dict]:
-    """[{source, name, chunks, pages}] for every file in the index."""
-    data = get_vectorstore().get(include=["metadatas"])
-    agg: dict[str, dict] = {}
-    for meta in data["metadatas"]:
-        src = meta.get("source", "unknown")
-        web = meta.get("origin") == "web"
-        name = f"🌐 {meta.get('title') or src}" if web else Path(src).name
-        e = agg.setdefault(src, {"source": src, "name": name, "chunks": 0, "pages": set(),
-                                 "origin": "web" if web else "file"})
-        e["chunks"] += 1
-        if meta.get("page") is not None:
-            e["pages"].add(meta["page"])
+    """[{source, name, chunks, pages, origin, versions}] for live files and web pages."""
     out = []
-    for e in sorted(agg.values(), key=lambda e: e["name"].lower()):
-        e["pages"] = len(e["pages"]) or None
-        out.append(e)
-    return out
+    for d in V.documents():
+        rows = V.version_chunks(d["doc_id"])
+        pages = {r["page"] for r in rows if r["page"] is not None}
+        out.append({"source": d["source"], "name": Path(d["source"]).name, "chunks": d["chunks"],
+                    "pages": len(pages) or None, "origin": "file", "doc_id": d["doc_id"],
+                    "version": d["active_version"], "versions": d["versions"]})
+    web = get_vectorstore().get(where={"origin": "web"}, include=["metadatas"])
+    agg: dict[str, dict] = {}
+    for meta in web["metadatas"]:
+        src = meta.get("source", "unknown")
+        e = agg.setdefault(src, {"source": src, "name": f"🌐 {meta.get('title') or src}",
+                                 "chunks": 0, "pages": None, "origin": "web"})
+        e["chunks"] += 1
+    out += agg.values()
+    return sorted(out, key=lambda e: e["name"].lower())
+
+
+def _chunk_document(file_docs: list[Document]) -> list:
+    chunks = []
+    for d in sorted(file_docs, key=lambda d: d.metadata.get("page") or 0):
+        if d.page_content.strip():
+            chunks += chunk_text(d.page_content, page=d.metadata.get("page"), start=len(chunks))
+    return chunks
 
 
 def ingest(rebuild: bool = False, progress=None) -> dict:
-    """Sync the vector store with DATA_DIR. Returns counts of what changed.
+    """Sync the vector store with DATA_DIR using versioned, content-addressed chunks.
 
     progress: optional callback(event: str, info: dict) for UIs. Events:
-      "loaded" (files), "skip", "split", "embed" (done, total), "stored", "removed"
+      "loaded", "skip", "sanitized", "split", "embed", "graph", "graph_progress",
+      "activated", "stored", "removed", "gc_scheduled"
     """
     emit = progress or (lambda event, info: None)
     batch_size = 32
@@ -152,39 +173,28 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
     docs = load_documents(config.DATA_DIR)
     if not docs:
         raise RuntimeError(f"No .pdf/.txt/.md files found in {config.DATA_DIR}")
-
     by_source: dict[str, list[Document]] = defaultdict(list)
     for d in docs:
         by_source[d.metadata["source"]].append(d)
     emit("loaded", {"files": len(by_source)})
 
     store = get_vectorstore()
-    existing = store.get(include=["metadatas"])
-    indexed: dict[str, dict] = defaultdict(lambda: {"hash": None, "ids": []})
-    for id_, meta in zip(existing["ids"], existing["metadatas"]):
-        if meta.get("origin") == "web":  # stored web passages, managed separately
-            continue
-        entry = indexed[meta.get("source", "")]
-        entry["hash"] = meta.get("file_hash")
-        entry["ids"].append(id_)
-
-    stats = {"added_files": 0, "updated_files": 0, "unchanged_files": 0,
-             "removed_files": 0, "chunks_written": 0, "files": []}
+    known = V.known_documents()
+    stats = {"added_files": 0, "updated_files": 0, "unchanged_files": 0, "removed_files": 0,
+             "failed_files": 0, "chunks_written": 0, "chunks_reused": 0, "files": []}
+    seen_docs = set()
 
     for source, file_docs in by_source.items():
+        doc_id = V.doc_id_for(source)
+        seen_docs.add(doc_id)
         digest = file_hash(source)
-        old = indexed.get(source)
-        if old and old["hash"] == digest:
+        if V.active_hash(doc_id) == digest:
             stats["unchanged_files"] += 1
             emit("skip", {"source": source})
             continue
-        if old and old["ids"]:
-            store.delete(ids=old["ids"])
-            stats["updated_files"] += 1
-        else:
-            stats["added_files"] += 1
-
+        status = "updated" if doc_id in known else "added"
         t0 = time.time()
+
         # Security: drop prompt-injection passages and redact PII before anything
         # is embedded or stored (policies/prompt_injection.json, policies/pii.json).
         sanitized = {"dropped": [], "redacted": set(), "hidden": 0}
@@ -195,56 +205,92 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
             sanitized["hidden"] += rep["html_comments"] + rep["images"]
         emit("sanitized", {"source": source, "dropped": sanitized["dropped"],
                            "redacted": sorted(sanitized["redacted"]), "hidden": sanitized["hidden"]})
+
+        # Structure-aware chunks with content-addressed ids.
+        records, unique = [], {}
+        for c in _chunk_document(file_docs):
+            cid = V.chunk_id_for(doc_id, c.text)
+            if cid in unique:  # identical chunk twice in one document: store once
+                continue
+            unique[cid] = c
+            records.append({"chunk_id": cid, "position": len(records), "heading": c.heading,
+                            "page": c.page})
+        ids = [r["chunk_id"] for r in records]
+        existing = set(store.get(ids=ids, include=[])["ids"]) if ids else set()
+        new_ids = [i for i in ids if i not in existing]
         text_pages = [d for d in file_docs if d.page_content.strip()]
-        chunks = split_documents(text_pages)
         report = {
-            "source": source,
+            "source": source, "status": status,
             "pages": len(file_docs) if file_docs[0].metadata.get("page") is not None else None,
             "pages_with_text": len(text_pages),
             "characters": sum(len(d.page_content) for d in text_pages),
-            "chunks": len(chunks),
-            "avg_chunk_chars": round(sum(len(c.page_content) for c in chunks) / len(chunks)) if chunks else 0,
-            "status": "updated" if old and old["ids"] else "added",
-            "injections_removed": len(sanitized["dropped"]),
-            "hidden_removed": sanitized["hidden"],
+            "chunks": len(records), "reused": len(records) - len(new_ids), "embedded": len(new_ids),
+            "avg_chunk_chars": round(sum(len(unique[i].text) for i in ids) / len(ids)) if ids else 0,
+            "injections_removed": len(sanitized["dropped"]), "hidden_removed": sanitized["hidden"],
             "pii_redacted": ", ".join(sorted(sanitized["redacted"])) or "-",
         }
         emit("split", report)
-        if not chunks:
+        if not records:
             print(f"Warning: no extractable text in {source} (scanned PDF? needs OCR)")
             stats.setdefault("empty_files", []).append(source)
-        ids = []
-        for i, c in enumerate(chunks):
-            c.metadata.update({"file_hash": digest, "chunk_index": i})
-            ids.append(f"{digest[:16]}-{i}")
-        for start in range(0, len(chunks), batch_size):
-            store.add_documents(chunks[start:start + batch_size], ids=ids[start:start + batch_size])
-            emit("embed", {"source": source, "done": min(start + batch_size, len(chunks)),
-                           "total": len(chunks)})
-        stats["chunks_written"] += len(chunks)
+
+        # New version: building (invisible) until everything below succeeds.
+        version = V.begin_version(doc_id, source, digest, records)
+        report["version"] = version
+        try:
+            for start in range(0, len(new_ids), batch_size):
+                batch = new_ids[start:start + batch_size]
+                store.add_documents(
+                    [Document(page_content=unique[i].text, metadata={
+                        "source": source, "doc_id": doc_id, "content_hash": unique[i].content_hash,
+                        "heading": unique[i].heading,
+                        **({"page": unique[i].page} if unique[i].page is not None else {})})
+                     for i in batch], ids=batch)
+                emit("embed", {"source": source, "done": min(start + batch_size, len(new_ids)),
+                               "total": len(new_ids)})
+            if config.GRAPH_ENABLED and new_ids:
+                from .graph import update_graph
+
+                emit("graph", {"source": source, "message": "Updating knowledge graph…"})
+                update_graph(progress=lambda i, n: emit("graph_progress", {"done": i, "total": n}))
+            V.activate(doc_id, version)
+        except Exception:
+            V.fail_version(doc_id, version)  # old version stays live; GC cleans up
+            stats["failed_files"] += 1
+            raise
+        emit("activated", {"source": source, "version": version})
+
+        stats["added_files" if status == "added" else "updated_files"] += 1
+        stats["chunks_written"] += len(new_ids)
+        stats["chunks_reused"] += len(records) - len(new_ids)
         report["seconds"] = round(time.time() - t0, 2)
         stats["files"].append(report)
         emit("stored", report)
 
-    for source, entry in indexed.items():
-        if source not in by_source and entry["ids"]:
-            store.delete(ids=entry["ids"])
+    for doc_id, source in known.items():
+        if doc_id not in seen_docs:
+            V.retire_document(doc_id)
             stats["removed_files"] += 1
             emit("removed", {"source": source})
 
-    if config.GRAPH_ENABLED and (stats["chunks_written"] or stats["removed_files"]
-                                  or stats["updated_files"] or rebuild):
-        from .graph import update_graph
+    if stats["updated_files"] or stats["removed_files"] or rebuild or _has_legacy(store):
+        V.start_gc_async()
+        emit("gc_scheduled", {"delay": config.GC_GRACE_SECONDS})
+        stats["gc_scheduled"] = True
 
-        emit("graph", {"message": "Updating knowledge graph…"})
-        stats["graph"] = update_graph(
-            progress=lambda i, n: emit("graph_progress", {"done": i, "total": n}))
-
-    total = len(store.get(include=[])["ids"])
+    live_files = sum(d["chunks"] for d in V.documents())
+    web = len(store.get(where={"origin": "web"}, include=[])["ids"])
+    stats["total_chunks"] = live_files + web
     print(
         f"Index synced: +{stats['added_files']} new, ~{stats['updated_files']} updated, "
         f"={stats['unchanged_files']} unchanged, -{stats['removed_files']} removed files; "
-        f"{stats['chunks_written']} chunks written, {total} chunks total."
+        f"{stats['chunks_written']} chunks embedded, {stats['chunks_reused']} reused; "
+        f"{stats['total_chunks']} live chunks."
     )
-    stats["total_chunks"] = total
     return stats
+
+
+def _has_legacy(store) -> bool:
+    """True if chunks from the pre-versioning scheme are still stored."""
+    meta = store.get(include=["metadatas"])["metadatas"]
+    return any(m.get("origin") != "web" and not m.get("doc_id") for m in meta)

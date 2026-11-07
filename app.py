@@ -96,19 +96,27 @@ def process_uploads(files) -> None:
             elif event == "split":
                 pages = f"{info['pages_with_text']}/{info['pages']} pages with text, " if info["pages"] else ""
                 st.write(
-                    f"**3. Split** — `{name}`: {pages}{info['characters']:,} characters → "
-                    f"**{info['chunks']} chunks** (~{info['avg_chunk_chars']} chars each)"
+                    f"**3. Chunk by structure** — `{name}`: {pages}{info['characters']:,} characters → "
+                    f"**{info['chunks']} chunks** by heading and paragraph; "
+                    f"**{info['reused']} unchanged (reused)**, {info['embedded']} new"
                 )
                 if info["chunks"] == 0:
                     st.warning(f"No extractable text in `{name}` — scanned PDFs need OCR.")
-                bars[name] = st.progress(0.0, text=f"4. Embed + store `{name}`")
+                bars[name] = st.progress(1.0 if not info["embedded"] else 0.0,
+                                         text=f"4. Embed + store `{name}`"
+                                              + (" (nothing new)" if not info["embedded"] else ""))
             elif event == "embed":
                 bars[name].progress(
                     info["done"] / info["total"],
                     text=f"4. Embed + store `{name}`: {info['done']}/{info['total']} chunks",
                 )
+            elif event == "activated":
+                st.write(f"🔀 `{name}` **version {info['version']} is live** (switched atomically)")
             elif event == "stored":
                 st.write(f"✅ `{name}` indexed in {info['seconds']}s")
+            elif event == "gc_scheduled":
+                st.write(f"🧹 Old versions will be garbage-collected in the background "
+                         f"(after {info['delay']:.0f}s)")
             elif event == "graph":
                 st.write("**5. Knowledge graph** — extracting entities and relations from new chunks")
                 bars["__graph__"] = st.progress(0.0, text="Updating knowledge graph…")
@@ -216,7 +224,7 @@ with tab_upload:
         st.markdown("**Last processing run**")
         st.dataframe(
             pd.DataFrame(report).assign(file=lambda d: d["source"].map(lambda s: Path(s).name))[
-                ["file", "status", "pages", "chunks", "injections_removed", "hidden_removed",
+                ["file", "status", "version", "chunks", "reused", "embedded", "injections_removed",
                  "pii_redacted", "seconds"]
             ],
             hide_index=True,
@@ -386,7 +394,8 @@ with tab_docs:
         st.info("Nothing indexed yet.")
     for d in docs:
         pages = f" · {d['pages']} pages" if d["pages"] else ""
-        with st.expander(f"**{d['name']}** — {d['chunks']} chunks{pages}"):
+        ver = f" · v{d['version']}" if d.get("version") else ""
+        with st.expander(f"**{d['name']}** — {d['chunks']} chunks{pages}{ver}"):
             if d.get("origin") == "web":
                 st.markdown(f"[{d['source']}]({d['source']})")
             else:
@@ -394,9 +403,15 @@ with tab_docs:
             if st.button("Remove document", key=f"del-{d['source']}", type="secondary"):
                 remove_source(d["source"])
                 st.rerun()
+            if d.get("doc_id"):
+                from rag.versioning import history
+
+                st.caption("Versions: " + ", ".join(
+                    f"v{h['version']} {h['status']} ({h['chunks']} chunks)" for h in history(d["doc_id"])))
             for c in get_chunks(d["source"]):
                 where = f"page {c['page'] + 1} · " if c["page"] is not None else ""
-                st.markdown(f"**Chunk {c['index']}** · {where}{len(c['text'])} chars")
+                head = f" · {c['heading']}" if c.get("heading") else ""
+                st.markdown(f"**Chunk {c['index']}**{head} · {where}{len(c['text'])} chars · `{c['chunk_id'][:12]}`")
                 st.text(c["text"])
 
 # ---------- knowledge graph ----------

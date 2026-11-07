@@ -137,21 +137,24 @@ def extract(text: str) -> Extraction:
 
 # ---------- storage ----------
 
-def graph_path():
-    return config.PERSIST_DIR / "knowledge_graph.json"
+def graph_path(persist_dir=None):
+    return (persist_dir or config.PERSIST_DIR) / "knowledge_graph.json"
 
 
-def load_graph() -> tuple[nx.MultiDiGraph, dict]:
+_graph_file_lock = __import__("threading").Lock()
+
+
+def load_graph(persist_dir=None) -> tuple[nx.MultiDiGraph, dict]:
     """(graph, processed) where processed maps chunk id -> True for extracted chunks."""
-    path = graph_path()
+    path = graph_path(persist_dir)
     if not path.exists():
         return nx.MultiDiGraph(), {}
     data = json.loads(path.read_text(encoding="utf-8"))
     return nx.node_link_graph(data["graph"], directed=True, multigraph=True, edges="edges"), data["processed"]
 
 
-def save_graph(g: nx.MultiDiGraph, processed: dict) -> None:
-    path = graph_path()
+def save_graph(g: nx.MultiDiGraph, processed: dict, persist_dir=None) -> None:
+    path = graph_path(persist_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"version": 1, "processed": processed,
             "graph": nx.node_link_data(g, edges="edges")}
@@ -179,11 +182,28 @@ def _remove_chunks(g: nx.MultiDiGraph, chunk_ids: set[str]) -> None:
             g.remove_node(n)
 
 
+def prune_chunks(chunk_ids: set[str], persist_dir=None) -> None:
+    """Remove facts that came from deleted chunks (called by the garbage collector)."""
+    with _graph_file_lock:
+        g, processed = load_graph(persist_dir)
+        _remove_chunks(g, chunk_ids)
+        for cid in chunk_ids:
+            processed.pop(cid, None)
+        save_graph(g, processed, persist_dir)
+
+
 def update_graph(progress=None, rebuild: bool = False) -> dict:
-    """Sync the graph with the chunks in Chroma. Returns counts."""
+    """Sync the graph with the chunks in Chroma (versioned file chunks, including
+    versions still being built, and web passages). Returns counts."""
+    with _graph_file_lock:
+        return _update_graph(progress, rebuild)
+
+
+def _update_graph(progress=None, rebuild: bool = False) -> dict:
     g, processed = (nx.MultiDiGraph(), {}) if rebuild else load_graph()
-    data = get_vectorstore().get(include=["documents"])
-    current = dict(zip(data["ids"], data["documents"]))
+    data = get_vectorstore().get(include=["documents", "metadatas"])
+    current = {i: t for i, t, m in zip(data["ids"], data["documents"], data["metadatas"])
+               if m.get("doc_id") or m.get("origin") == "web"}  # skip legacy chunks
 
     removed = set(processed) - set(current)
     if removed:
@@ -249,17 +269,23 @@ def match_entities(question: str, top: int = 4, min_sim: float = 0.55) -> list[s
 
 def graph_context(question: str, max_facts: int = 15, max_chunks: int | None = None) -> tuple[list[str], list[str], list[str]]:
     """(seed entity names, fact lines, chunk ids ranked by how many facts cite them)."""
+    from .versioning import is_active
+
     max_chunks = max_chunks or config.GRAPH_K
     g, _, _ = _graph_index()
-    seeds = match_entities(question)
+    # Only entities and facts backed by live chunks (active versions, web).
+    seeds = [s for s in match_entities(question) if any(is_active(c) for c in g.nodes[s]["chunks"])]
     if not seeds:
         return [], [], []
     facts, votes = [], {}
     for s in seeds:
         for c in g.nodes[s]["chunks"]:
-            votes[c] = votes.get(c, 0) + 2
+            if is_active(c):
+                votes[c] = votes.get(c, 0) + 2
         edges = list(g.out_edges(s, data=True)) + list(g.in_edges(s, data=True))
         for u, v, d in edges:
+            if not is_active(d["chunk"]):
+                continue
             line = f"{g.nodes[u]['name']} --{d['relation']}--> {g.nodes[v]['name']}"
             if line not in facts:
                 facts.append(line)

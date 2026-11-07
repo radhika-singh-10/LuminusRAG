@@ -1,4 +1,4 @@
-"""LuminusRAG CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security | graph"""
+"""LuminusRAG CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security | graph | gc | versions | chunks"""
 import argparse
 import sys
 from pathlib import Path
@@ -78,6 +78,10 @@ def main() -> int:
     gr = sub.add_parser("graph", help="Knowledge graph: build, stats, or show an entity")
     gr.add_argument("action", choices=["build", "rebuild", "stats", "show"])
     gr.add_argument("entity", nargs="?", help="Entity name for 'show'")
+    sub.add_parser("gc", help="Garbage-collect retired document versions now")
+    sub.add_parser("versions", help="Show document versions and registry state")
+    ch = sub.add_parser("chunks", help="Show the active chunks of a file")
+    ch.add_argument("file")
     sub.add_parser("chats", help="List saved chats")
     summ = sub.add_parser("summarize", help="Summarize each saved chat with the local LLM")
     summ.add_argument("chat_id", nargs="?", help="One chat id (default: every chat)")
@@ -101,7 +105,33 @@ def main() -> int:
     if args.cmd == "ingest":
         from rag.ingest import ingest
 
+        from rag.versioning import wait_for_gc
+
         ingest(rebuild=args.rebuild)
+        wait_for_gc()  # the background GC must finish before this process exits
+        return 0
+
+    if args.cmd == "gc":
+        from rag.versioning import collect_garbage
+
+        print(collect_garbage(grace_seconds=0))
+        return 0
+
+    if args.cmd == "versions":
+        from rag import versioning as V
+
+        print(V.registry_stats())
+        for d in sorted(V.documents(), key=lambda d: d["source"]):
+            print(f"\n{Path(d['source']).name}  ({d['doc_id']}, active v{d['active_version']}, {d['chunks']} chunks)")
+            for h in V.history(d["doc_id"]):
+                print(f"  v{h['version']:<3} {h['status']:<9} {h['chunks']:>3} chunks  {h['created']}")
+        return 0
+
+    if args.cmd == "chunks":
+        from rag.ingest import get_chunks
+
+        for c in get_chunks(str(Path(args.file).resolve())):
+            print(f"[{c['index']}] {c['chunk_id'][:14]}  {c['heading'] or '-'}  ({len(c['text'])} chars)")
         return 0
 
     if args.cmd == "graph":
@@ -180,7 +210,10 @@ def main() -> int:
     if args.cmd == "add":
         from rag.ingest import add_files
 
+        from rag.versioning import wait_for_gc
+
         add_files(args.files)
+        wait_for_gc()
         return 0
 
     if args.cmd == "docs":
