@@ -1,6 +1,7 @@
 # Research papers behind LuminusRAG
 
-The research that LuminusRAG's design draws on, grouped by layer. Each entry
+The research that LuminusRAG's design draws on, grouped by layer, ending with
+harness engineering, the design approach behind the whole system. Each entry
 gives the problem the paper solved and where the idea appears in this project.
 LuminusRAG implements these ideas in simplified form, for a small local model
 and a small corpus. It doesn't reproduce the papers' systems.
@@ -73,6 +74,61 @@ arXiv version are cited by venue.
 | 34 | Du, Y., Li, C., Guo, R., et al. **PP-OCR: A Practical Ultra Lightweight OCR System.** 2020. [arXiv:2009.09941](https://arxiv.org/abs/2009.09941) | Small, accurate detection + recognition models for practical OCR | RapidOCR (PP-OCR models on onnxruntime) for scanned PDFs (`rag/ocr.py`) |
 | 35 | Liao, M., Wan, Z., Yao, C., Chen, K., Bai, X. **Real-time Scene Text Detection with Differentiable Binarization.** AAAI 2020. [arXiv:1911.08947](https://arxiv.org/abs/1911.08947) | Fast, accurate text detection | The text-detection stage of the OCR pipeline |
 
+## 7. Harness engineering
+
+An agent is a **model plus a harness**: the runtime around the LLM that owns the
+loop, tools, context management, memory, safety controls, orchestration,
+observability and evaluation. Harness engineering treats that runtime as the
+thing to design and measure, with the model weights held fixed. LuminusRAG is
+built this way. Two small local models (Qwen2.5-1.5B and Llama 3.2 3B) are never
+fine-tuned, and every gain in results.md comes from changing the harness.
+
+These are 2026 arXiv preprints; their author lists are long, so the institutions are given instead.
+
+| # | Citation | Idea | In LuminusRAG |
+|---|---|---|---|
+| 36 | **Harness Engineering: Anatomy, Architecture, and Evolution of Coding Agents — A Source-Code Study of Eleven Systems.** Inclusive Brains, Wavestone AI Lab, 2026. [arXiv:2609.00006](https://arxiv.org/abs/2609.00006) | Defines the harness: loop, tools, context management, safety controls, orchestration, extension surfaces | The layered harness in `rag/agent/` (memory → safety → context → intent → retrieval → answer → personalization → follow-ups → summary → eval → save) |
+| 37 | **MemoHarness: Agent Harnesses That Learn from Experience.** University of Notre Dame, LMU Munich, USC, 2026. [arXiv:2607.14159](https://arxiv.org/abs/2607.14159) | The harness as the control layer managing context, tools, orchestration, memory, decoding and output handling | Memory layer (session state, rolling summary, interest profile) and output sanitizer |
+| 38 | **Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses.** Fudan University, Peking University, 2026. [arXiv:2604.25850](https://arxiv.org/abs/2604.25850) | Observability (traces) as the basis for improving a harness | Per-tool trace (layer, tool, ms, note) on every turn; trace-driven fixes such as the stale step counter and the intent misread |
+| 39 | **Trial by Trace: Benchmarking AI Agent Harnesses for Reliability and Failure Attribution.** Institute of Automation CAS, Tsinghua University, et al., 2026. [arXiv:2610.32285](https://arxiv.org/abs/2610.32285) | Reliability and attributing failures from traces | Failure attribution from the trace (e.g. `intent_check → unsupported`), pass^k reliability |
+| 40 | **When Agents Fail: Model or Harness — Who's to Blame?** Shanghai AI Laboratory, 2026. [arXiv:2610.32483](https://arxiv.org/abs/2610.32483) | Benchmark results reflect model and harness together; evaluate the harness | Harness ablations with the model fixed: personalization on/off, retrieval mode, TOP_K, follow-up rewriting (`bench`, `eval-agent --compare`) |
+| 41 | **SHE: Trajectory-driven Safety Harness Evolution for LLM Agents.** Fudan University, Shanghai Jiao Tong University, 2026. [arXiv:2608.09885](https://arxiv.org/abs/2608.09885) | Agent safety lives in the harness (context, tools, permissions, runtime control), not only in weights | Safety enforced by the harness: guard before any model sees the question, no tool execution, fixed layer order, output sanitizer |
+| 42 | **HarnessOpt-Bench: Evaluating LLMs at Harness Optimization.** Scale AI, 2026. [arXiv:2608.06301](https://arxiv.org/abs/2608.06301) | Capability depends on prompts, tools, control flow, memory and orchestration, not only weights | Tuning harness parameters against evals (TOP_K, personalization weights, follow-up thresholds) |
+| 43 | **Self-Harness: Harnesses That Improve Themselves.** Shanghai AI Laboratory, 2026. [arXiv:2606.09498](https://arxiv.org/abs/2606.09498) | Different models need different harnesses; harnesses can be adapted per model | Model-specific harness choices: few-shot rewriter, plain-text judge format, rule-based second check for the small intent model |
+
+**How LuminusRAG applies harness engineering**
+
+- **Model fixed, harness measured.** The models are never fine-tuned; every
+  change is evaluated by changing the harness alone. Examples from results.md:
+  | Harness change | Metric | Before → after |
+  |---|---|---|
+  | Follow-up rewriting | accuracy | 0.40 → 0.83 |
+  | Hybrid GraphRAG | relational accuracy | 0.70 → 0.83 |
+  | Personalized retrieval | MRR | 0.51 → 0.76 |
+  | Personalized retrieval | faithfulness | 0.62 → 0.70 |
+  | TOP_K re-tuning | recall | 0.82 → 1.00 |
+  | Policy guard | blocked attacks | 35 of 36, no benign questions blocked |
+- **Each layer is a typed tool.** Memory, safety, context, retrieval,
+  personalization, follow-ups, summarization and eval are LangChain tools, so
+  each can be tested, traced and swapped on its own.
+- **Deterministic orchestration where safety needs it.** LangGraph runs the
+  tools in a fixed order. The guard always runs before any model sees the
+  question, and the models have no tool that executes anything.
+- **Context engineering.** Recent turns, a rolling summary and interests are
+  assembled within a character budget, and follow-ups are rewritten into
+  standalone questions before retrieval.
+- **Observability.** Every tool call is traced with timing and a note. The
+  trace is how the stale step counter and the misread intent were found.
+- **Guards matched to model weaknesses.** Where the small model is unreliable,
+  the harness adds a deterministic check instead of trusting a prompt:
+  - a rule-based second check for words like "guardrail" that have an AI meaning
+  - schema checks on graph extraction
+  - grounding checks on follow-up suggestions
+  - turning off the OCR direction classifier
+- **Evaluation inside the harness.** Every turn gets online signals
+  (`evaluate_turn`), and offline evals cover sessions, security, the intent
+  gate, OCR and personalization.
+
 ## Suggested reading order
 
 1. **RAG** [1] and **Dense X Retrieval** [7]: the core pipeline and why chunking matters.
@@ -80,3 +136,4 @@ arXiv version are cited by venue.
 3. **CRAG** [19]: retrieval checks with a web fallback.
 4. **RAGAS** [23] and **τ-bench** [22]: how to measure RAG quality and reliability.
 5. **Greshake et al.** [29] and **Spotlighting** [30]: why retrieved text must be treated as untrusted.
+6. **Harness Engineering: Anatomy…** [36] and **When Agents Fail: Model or Harness** [40]: the harness as the unit of design and evaluation.

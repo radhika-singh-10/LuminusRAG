@@ -265,6 +265,12 @@ and retrieval recall matches the native text (1.00). Full results are in
 
 ## Agent harness (multi-step conversations)
 
+LuminusRAG follows **harness engineering**: the models are small and fixed
+(Qwen2.5-1.5B, Llama 3.2 3B, never fine-tuned), and every gain comes from the
+harness around them. That harness covers the tools, context, memory, safety,
+orchestration, tracing and evaluation, and each change is measured with the
+model held fixed. See [researchpaper.md](researchpaper.md#7-harness-engineering).
+
 The Ask tab and `python main.py agent` run every question through an agent
 harness (`rag/agent/`). Each layer is a typed LangChain tool, and a
 LangGraph state machine calls them in a fixed order. Safety has to run before
