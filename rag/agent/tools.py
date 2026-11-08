@@ -77,11 +77,12 @@ def safety_check(text: str, use_llm: bool = True):
 
 
 @tool
-def intent_check(question: str):
-    """Classify the question's intent; only AI-related questions are allowed."""
+def intent_check(question: str, recent: list[str] | None = None):
+    """Classify the question's intent; only AI-related questions are allowed.
+    `recent` (earlier questions in the chat) disambiguates terms like "guardrails"."""
     from ..intent import classify_intent
 
-    return classify_intent(question)
+    return classify_intent(question, recent)
 
 
 # ---------- context ----------

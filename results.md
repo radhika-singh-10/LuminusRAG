@@ -139,14 +139,14 @@ Positive class = questions the documents can't answer.
 ## Intent gate (`eval-intent`)
 
 ```text
-Intent gate (llama3.2:3b): 49 queries, 0 errors
+Intent gate (llama3.2:3b): 55 queries, 0 errors
   accuracy           1.000
   precision          1.000
   recall             1.000
   f1                 1.000
   false allowed      0
   false blocked      0
-  secs per query     0.13
+  secs per query     0.12
 variant  accuracy   pass@1   pass@k   pass^k    ret_P    ret_R      MRR   tok_F1 faithful   halluc  abst_F1     secs
 ```
 
@@ -388,3 +388,24 @@ is checked by both gates again, so over-blocking is the safe direction.
 | context | 13 |
 | personalization | 13 |
 | eval | 1 |
+
+### Intent gate: AI terms that also have an everyday meaning (2026-11-07)
+
+"Tell me about the famous guardrail mechanisms used today" was refused as
+unsupported, 3 runs out of 3. "...the latest guardrail mechanisms" was
+allowed. The 3B classifier read "guardrail" in its highway sense.
+
+- **Prompt fixes didn't help.** Adding the AI meaning or this exact example to
+  the prompt did not change the verdict. It also made a neuroscience question
+  pass (accuracy 1.00 -> 0.98), so the prompt is unchanged.
+- **The fix is a rule-based second check.** When the model says "unsupported" but
+  the query uses a term with a well-known AI meaning (guardrails,
+  hallucination, alignment, jailbreak, prompts, agents, embeddings,
+  fine-tuning, ...), it is allowed. That holds only if the query names no other
+  field (highway, construction, OSHA, travel agents, ...) and requests no
+  action (run, download, send, ... or a command).
+- **The intent check reads the conversation.** It sees the chat's earlier
+  questions, only to resolve ambiguous wording ("what about the famous ones?").
+  Clearly non-AI questions are still refused in an AI conversation.
+- **Regression tests added.** 6 cases went into `eval/intent_dataset.jsonl`,
+  which now has 55 queries; accuracy is still 1.00.

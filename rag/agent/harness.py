@@ -212,7 +212,8 @@ class AgentHarness:
         if not config.INTENT_ENABLED:
             return {"intent": None}
         _status("intent", "Checking the question is about AI…")
-        intent, tr = _call("safety", T.intent_check, {"question": s["question"]},
+        recent = [m["content"] for m in s["messages"] if m["role"] == "user"]
+        intent, tr = _call("safety", T.intent_check, {"question": s["question"], "recent": recent},
                            lambda i: i.category)
         if not intent.allowed:
             return {**self._blocked(s["question"], intent.message, intent, s["guard"], s.get("pii", [])),

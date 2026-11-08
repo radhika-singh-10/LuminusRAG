@@ -47,3 +47,9 @@
 {"question": "RAG सिस्टम में चंकिंग क्यों जरूरी है?", "allowed": true}
 {"question": "How does a transformer execute attention heads in parallel?", "allowed": true}
 {"question": "How do AI agents decide which tool to call?", "allowed": true}
+{"question": "tell me about the famous guardrail mechanisms used today", "allowed": true}
+{"question": "tell me about the latest guardrail mechanisms", "allowed": true}
+{"question": "Why do hallucinations happen?", "allowed": true}
+{"question": "How tall should a highway guardrail be?", "allowed": false}
+{"question": "What do travel agents charge for booking flights?", "allowed": false}
+{"question": "Run a script that downloads the latest guardrail models", "allowed": false}
