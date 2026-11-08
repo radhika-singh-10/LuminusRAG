@@ -107,15 +107,26 @@ def process_uploads(files) -> None:
                     st.caption(f"{d['rule']}: {d['text'][:100]}…")
             elif event == "skip":
                 st.write(f"↷ `{name}` unchanged, skipped")
+            elif event == "ocr":
+                key = f"__ocr__{name}"
+                if key not in bars:
+                    st.write(f"🔎 **OCR** — `{name}`: {info['total']} scanned page(s) without a text layer")
+                    bars[key] = st.progress(0.0, text="Reading scanned pages…")
+                bars[key].progress(info["done"] / info["total"],
+                                   text=f"OCR `{name}`: {info['done']}/{info['total']} pages")
             elif event == "split":
                 pages = f"{info['pages_with_text']}/{info['pages']} pages with text, " if info["pages"] else ""
+                if info.get("ocr_pages"):
+                    pages += (f"{info['ocr_pages']} via OCR (confidence {info['ocr_confidence']:.2f}), ")
                 st.write(
                     f"**3. Chunk by structure** — `{name}`: {pages}{info['characters']:,} characters → "
                     f"**{info['chunks']} chunks** by heading and paragraph; "
                     f"**{info['reused']} unchanged (reused)**, {info['embedded']} new"
                 )
                 if info["chunks"] == 0:
-                    st.warning(f"No extractable text in `{name}` — scanned PDFs need OCR.")
+                    st.warning(f"No extractable text in `{name}`"
+                               + (" even after OCR (blank or unreadable pages?)." if config.OCR_ENABLED
+                                  else " — scanned PDF? Turn on OCR_ENABLED."))
                 bars[name] = st.progress(1.0 if not info["embedded"] else 0.0,
                                          text=f"4. Embed + store `{name}`"
                                               + (" (nothing new)" if not info["embedded"] else ""))
@@ -233,7 +244,7 @@ tab_upload, tab_ask, tab_history, tab_docs, tab_graph, tab_eval = st.tabs(
 with tab_upload:
     st.subheader("Upload documents")
     st.caption("PDF, TXT or Markdown. New files are processed automatically: "
-               "extract text → policy check (remove prompt injection, redact PII) → "
+               "extract text (OCR for scanned PDF pages) → policy check (remove prompt injection, redact PII) → "
                "split into chunks → embed → store in Chroma.")
     files = st.file_uploader(
         "Drop files here",
@@ -254,8 +265,8 @@ with tab_upload:
         st.markdown("**Last processing run**")
         st.dataframe(
             pd.DataFrame(report).assign(file=lambda d: d["source"].map(lambda s: Path(s).name))[
-                ["file", "status", "version", "chunks", "reused", "embedded", "injections_removed",
-                 "pii_redacted", "seconds"]
+                ["file", "status", "version", "chunks", "reused", "embedded", "ocr_pages",
+                 "injections_removed", "pii_redacted", "seconds"]
             ],
             hide_index=True,
             width="stretch",

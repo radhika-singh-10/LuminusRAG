@@ -89,3 +89,10 @@ INTEREST_DECAY = float(os.getenv("INTEREST_DECAY", "0.8"))
 PERSONAL_WEIGHT = float(os.getenv("PERSONAL_WEIGHT", "0.15"))  # profile similarity in ranking
 PPR_WEIGHT = float(os.getenv("PPR_WEIGHT", "0.1"))             # personalized PageRank in ranking
 LONG_TERM_WEIGHT = float(os.getenv("LONG_TERM_WEIGHT", "0.3"))  # interests from the user's other chats
+
+# OCR for scanned PDFs (RapidOCR, local): pages with almost no text layer are OCR'd
+OCR_ENABLED = os.getenv("OCR_ENABLED", "true").lower() == "true"
+OCR_DPI = int(os.getenv("OCR_DPI", "200"))
+OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "30"))  # fewer non-space chars -> OCR the page
+OCR_MIN_CONFIDENCE = float(os.getenv("OCR_MIN_CONFIDENCE", "0.5"))  # drop less certain lines
+OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "300"))  # per file

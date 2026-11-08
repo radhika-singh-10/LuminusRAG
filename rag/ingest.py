@@ -2,7 +2,8 @@
 
 For every file in DATA_DIR:
 1. Unchanged files (same file hash as the active version) are skipped.
-2. New or changed files are policy-sanitized and split by structure
+2. New or changed files are OCR'd where a PDF page has no text layer
+   (rag/ocr.py), policy-sanitized and split by structure
    (headings, sections, paragraphs; see rag/chunking.py).
 3. Each chunk id is a hash of its content, so chunks that did not change keep
    their id and embedding; only new chunks are embedded.
@@ -29,6 +30,7 @@ from .policy import sanitize_document
 from .store import get_vectorstore
 
 CHUNKER_VERSION = "structure-v1"
+OCR_VERSION = "rapidocr-v1"
 SUPPORTED = {".pdf", ".txt", ".md"}
 UPLOAD_DIR_NAME = "uploads"
 
@@ -64,7 +66,41 @@ def file_hash(path: str | Path) -> str:
     for policy in sorted((config.ROOT / "policies").glob("*.json")):
         h.update(policy.read_bytes())
     h.update(f"|guard_llm={config.GUARD_LLM}".encode())
+    if str(path).lower().endswith(".pdf"):  # OCR settings change what a scanned PDF yields
+        h.update(f"|ocr={config.OCR_ENABLED}:{OCR_VERSION}:{config.OCR_DPI}:"
+                 f"{config.OCR_MIN_CHARS}:{config.OCR_MIN_CONFIDENCE}".encode())
     return h.hexdigest()
+
+
+def apply_ocr(source: str, file_docs: list[Document], emit=None) -> dict:
+    """OCR the pages of a PDF that have (almost) no text layer, in place.
+    Returns {"pages": [...], "confidence": mean or None, "seconds": total}."""
+    from .ocr import needs_ocr, ocr_pdf_pages
+
+    info = {"pages": [], "confidence": None, "seconds": 0.0}
+    if not (config.OCR_ENABLED and source.lower().endswith(".pdf")):
+        return info
+    by_page = {d.metadata.get("page"): d for d in file_docs if d.metadata.get("page") is not None}
+    todo = sorted(p for p, d in by_page.items() if needs_ocr(d.page_content))
+    if not todo:
+        return info
+    if emit:
+        emit("ocr", {"source": source, "done": 0, "total": len(todo)})
+    results = ocr_pdf_pages(source, todo, progress=lambda i, n: emit and emit(
+        "ocr", {"source": source, "done": i, "total": n}))
+    confs = []
+    for page, r in results.items():
+        info["seconds"] += r.seconds
+        if r.text.strip():
+            d = by_page[page]
+            d.page_content = r.text
+            d.metadata.update(ocr=True, ocr_confidence=r.confidence)
+            info["pages"].append(page)
+            confs.append(r.confidence)
+    if confs:
+        info["confidence"] = round(sum(confs) / len(confs), 4)
+    info["seconds"] = round(info["seconds"], 1)
+    return info
 
 
 def save_upload(name: str, data: bytes) -> Path:
@@ -162,7 +198,7 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
     """Sync the vector store with DATA_DIR using versioned, content-addressed chunks.
 
     progress: optional callback(event: str, info: dict) for UIs. Events:
-      "loaded", "skip", "sanitized", "split", "embed", "graph", "graph_progress",
+      "loaded", "skip", "ocr", "sanitized", "split", "embed", "graph", "graph_progress",
       "activated", "stored", "removed", "gc_scheduled"
     """
     emit = progress or (lambda event, info: None)
@@ -194,6 +230,9 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
             continue
         status = "updated" if doc_id in known else "added"
         t0 = time.time()
+
+        # Scanned pages: OCR before the policy check, so OCR text is sanitized too.
+        ocr = apply_ocr(source, file_docs, emit)
 
         # Security: drop prompt-injection passages and redact PII before anything
         # is embedded or stored (policies/prompt_injection.json, policies/pii.json).
@@ -228,13 +267,16 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
             "avg_chunk_chars": round(sum(len(unique[i].text) for i in ids) / len(ids)) if ids else 0,
             "injections_removed": len(sanitized["dropped"]), "hidden_removed": sanitized["hidden"],
             "pii_redacted": ", ".join(sorted(sanitized["redacted"])) or "-",
+            "ocr_pages": len(ocr["pages"]), "ocr_confidence": ocr["confidence"],
         }
         emit("split", report)
         if not records:
-            print(f"Warning: no extractable text in {source} (scanned PDF? needs OCR)")
+            print(f"Warning: no extractable text in {source}"
+                  + (" (even after OCR)" if config.OCR_ENABLED else " (scanned PDF? set OCR_ENABLED=true)"))
             stats.setdefault("empty_files", []).append(source)
 
         # New version: building (invisible) until everything below succeeds.
+        ocr_pages = set(ocr["pages"])
         version = V.begin_version(doc_id, source, digest, records)
         report["version"] = version
         try:
@@ -244,7 +286,8 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
                     [Document(page_content=unique[i].text, metadata={
                         "source": source, "doc_id": doc_id, "content_hash": unique[i].content_hash,
                         "heading": unique[i].heading,
-                        **({"page": unique[i].page} if unique[i].page is not None else {})})
+                        **({"page": unique[i].page} if unique[i].page is not None else {}),
+                        **({"ocr": True} if unique[i].page in ocr_pages else {})})
                      for i in batch], ids=batch)
                 emit("embed", {"source": source, "done": min(start + batch_size, len(new_ids)),
                                "total": len(new_ids)})

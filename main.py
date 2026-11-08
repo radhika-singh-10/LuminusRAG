@@ -1,4 +1,4 @@
-"""LuminusRAG CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security | graph | gc | versions | chunks | agent | eval-agent"""
+"""LuminusRAG CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security | graph | gc | versions | chunks | agent | eval-agent | eval-ocr | ocr"""
 import argparse
 import sys
 from pathlib import Path
@@ -158,6 +158,10 @@ def main() -> int:
     ea.add_argument("--compare", action="store_true", help="Also run sessions with personalization off")
     ea.add_argument("--no-sessions", action="store_true", help="Personalized retrieval only")
     ea.add_argument("--no-retrieval", action="store_true", help="Sessions only")
+    sub.add_parser("eval-ocr", help="OCR accuracy (CER/WER) and retrieval on synthetic scanned PDFs")
+    oc = sub.add_parser("ocr", help="OCR a PDF and print the text of its scanned pages")
+    oc.add_argument("file", type=Path)
+    oc.add_argument("--all", action="store_true", help="OCR every page, not only pages without text")
     bench = sub.add_parser("bench", help="Run and compare eval variants from an experiments file")
     bench.add_argument("--config", type=Path, default=config.ROOT / "eval" / "experiments.json")
     bench.add_argument("--only", default=None, help="Comma-separated variant names")
@@ -172,6 +176,29 @@ def main() -> int:
 
         ingest(rebuild=args.rebuild)
         wait_for_gc()  # the background GC must finish before this process exits
+        return 0
+
+    if args.cmd == "eval-ocr":
+        from rag.eval.ocr_eval import run_ocr_eval
+
+        out = run_ocr_eval()
+        print(f"\nSaved to {out['path']}  ({out['seconds']}s)")
+        return 0
+
+    if args.cmd == "ocr":
+        from langchain_community.document_loaders import PyPDFLoader
+
+        from rag.ocr import needs_ocr, ocr_pdf_pages
+
+        pages = PyPDFLoader(str(args.file)).load()
+        todo = [i for i, d in enumerate(pages) if args.all or needs_ocr(d.page_content)]
+        if not todo:
+            print(f"All {len(pages)} pages have a text layer; nothing to OCR (use --all to force).")
+            return 0
+        for i, r in ocr_pdf_pages(args.file, todo).items():
+            conf = f"{r.confidence:.2f}" if r.confidence is not None else "n/a"
+            print(f"--- page {i + 1} (OCR, {r.lines} lines, confidence {conf}, {r.seconds:.1f}s) ---")
+            print(r.text or "[no text found]")
         return 0
 
     if args.cmd == "eval-agent":

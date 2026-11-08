@@ -121,7 +121,8 @@ LuminusRAG/
 ├── rag/
 │   ├── config.py        # env-driven settings
 │   ├── store.py         # Chroma vector store, embeddings, retriever
-│   ├── ingest.py        # load -> sanitize -> chunk -> versioned, content-addressed upsert
+│   ├── ingest.py        # load -> OCR -> sanitize -> chunk -> versioned, content-addressed upsert
+│   ├── ocr.py           # OCR for scanned PDF pages (RapidOCR + pypdfium2, local)
 │   ├── chunking.py      # stable structure-aware chunking (headings, sections, paragraphs)
 │   ├── versioning.py    # version registry, active chunk set, async garbage collector
 │   ├── intent.py        # Ollama intent gate (AI questions only)
@@ -148,6 +149,7 @@ LuminusRAG/
 │       ├── llm_judge.py     # LLM-as-judge correctness + agreement / kappa
 │       ├── security_eval.py # full-pipeline PII + prompt-injection eval
 │       ├── agent_eval.py # personalization + 10-step follow-up sessions
+│       ├── ocr_eval.py  # OCR CER/WER + retrieval on synthetic scanned PDFs
 │       ├── runner.py    # single eval run -> report
 │       └── harness.py   # multi-variant experiments + comparison table
 ├── eval/
@@ -197,6 +199,8 @@ python main.py chat                            # interactive
 python main.py agent                           # multi-step agent: follow-up suggestions, 10 steps max
 python main.py agent --trace                   # ...with the per-layer tool trace
 python main.py eval-agent --compare            # personalization + session eval (vs personalization off)
+python main.py ocr scan.pdf                    # OCR the scanned pages of a PDF and print the text
+python main.py eval-ocr                        # OCR accuracy + retrieval on synthetic scans
 python main.py eval -n 5 -k 1,3,5              # evaluate on eval/dataset.jsonl
 python main.py bench                           # run + compare variants in eval/experiments.json
 python main.py bench --only baseline,mmr -v
@@ -227,6 +231,36 @@ The web UI has four tabs:
 Ingestion is incremental and versioned: unchanged files are skipped, an edited
 file re-embeds only the chunks that changed, and deleted files are retired and
 cleaned up in the background (see Versioned ingestion).
+
+## OCR for scanned PDFs
+
+PDF pages with no usable text layer (fewer than `OCR_MIN_CHARS` characters)
+are OCR'd during ingestion (`rag/ocr.py`):
+
+- **Engine:** pages are rendered with pypdfium2 at `OCR_DPI` and read with RapidOCR
+  (PP-OCR models on onnxruntime). Everything runs locally, with no system install
+  and no network.
+- **Reading order:** recognised lines are grouped into rows, and blank vertical space
+  becomes a paragraph break, so the structure-aware chunker still packs by paragraph.
+- **Low-confidence lines** (below `OCR_MIN_CONFIDENCE`) are dropped. RapidOCR's
+  180° text-direction classifier is off: it flipped some upright lines into garbage
+  and pushed character error to 2–5%.
+- **Untrusted text:** OCR text goes through the same policy sanitizer as typed text,
+  so prompt injection hidden in a scanned image is removed and PII is redacted.
+- **Only changed files:** OCR runs only for new or changed files. Chunks from OCR'd
+  pages carry `ocr: true`, and the upload view shows OCR progress, page count and
+  mean confidence.
+
+`python main.py eval-ocr` renders four corpus documents as image-only PDFs
+(clean, skewed with blur and noise, and 100 dpi) and measures character and word
+error rates and retrieval. On the clean scans the character error rate is 0.000,
+and retrieval recall matches the native text (1.00). Full results are in
+[results.md](results.md).
+
+**Limitations:**
+- Multi-column pages are read row by row across the columns.
+- Headings aren't detected, so a scanned page is one section.
+- There's no handwriting support.
 
 ## Agent harness (multi-step conversations)
 
@@ -601,6 +635,8 @@ Each run writes `per_question.jsonl` and `summary.json` under `eval/results/`.
 | `WEB_MAX_RESULTS` / `WEB_FETCH_PAGES` / `WEB_TIMEOUT` | `5` / `3` / `10` s |
 | `CHAT_DB_URL` | `sqlite:///chats/history.sqlite` |
 | `NLI_MODEL` | `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` |
+| `OCR_ENABLED` / `OCR_DPI` / `OCR_MIN_CHARS` | `true` / `200` / `30` (pages with fewer text chars are OCR'd) |
+| `OCR_MIN_CONFIDENCE` / `OCR_MAX_PAGES` | `0.5` / `300` per file |
 | `AGENT_MAX_STEPS` / `AGENT_MAX_FOLLOWUPS` / `AGENT_MODEL` | `10` / `3` / `llama3.2:3b` |
 | `FOLLOWUP_MIN_SCORE` / `FOLLOWUP_MIN_RELEVANCE` | `0.5` / `0.25` (cosine) |
 | `SUMMARY_EVERY` / `AGENT_ONLINE_NLI` | `3` / `false` |

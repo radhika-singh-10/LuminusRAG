@@ -409,3 +409,36 @@ allowed. The 3B classifier read "guardrail" in its highway sense.
   Clearly non-AI questions are still refused in an AI conversation.
 - **Regression tests added.** 6 cases went into `eval/intent_dataset.jsonl`,
   which now has 55 queries; accuracy is still 1.00.
+
+## OCR for scanned PDFs (`eval-ocr`)
+
+2026-11-07, RapidOCR 3.10 (PP-OCRv6 small det/rec, onnxruntime), `OCR_DPI=200`.
+Four corpus documents (vector databases, embeddings, chunking, evaluation)
+were rendered as image-only PDFs with no text layer. Raw output:
+`eval/results/ocr-20261107-172253.json`.
+
+| Scan condition | CER | WER | mean confidence | seconds / page |
+|---|---|---|---|---|
+| clean, 200 dpi | 0.000 | 0.004 | 0.994 | 0.83 |
+| skewed 1.5°, blurred, speckle noise | 0.001 | 0.015 | 0.992 | 0.63 |
+| low resolution, 100 dpi | 0.000 | 0.004 | 0.994 | 0.73 |
+
+**Retrieval.** 11 eval questions have their evidence in these documents. Each
+version was ingested into its own sandbox store.
+
+| Indexed as | recall@k | MRR | chunks |
+|---|---|---|---|
+| native Markdown | 1.000 | 1.000 | 19 |
+| scanned PDF + OCR | 1.000 | 0.909 | 9 (incl. the runbook page) |
+
+Scans have no Markdown headings, so each page is one section and packs into
+fewer, larger chunks. That costs some ranking (MRR 0.91) but no recall.
+
+**Safety.** A scanned runbook page contained a prompt-injection sentence and
+an email address. After ingestion the injection was dropped (1 reported) and
+the email was redacted. The useful text on that page was kept.
+
+**Fix found by this eval.** With RapidOCR's default 180° direction
+classifier, some upright lines were flipped and read as fragments
+("en ig i s es"), giving 2–5% CER that varied unpredictably with DPI. With
+the classifier off, CER is 0–0.3% at every DPI tested (150/200/300).
