@@ -294,3 +294,97 @@ hybrid retrieval, 3 sampled answers per question.
 - **What the new chunking buys:** editing one paragraph re-embeds only that section's chunk, and
   versions switch atomically with old versions garbage-collected in the background (see README).
 
+
+## Agent harness: follow-ups and personalization
+
+`python main.py eval-agent --compare` (2026-11-07, Qwen2.5-1.5B + llama3.2:3b,
+TOP_K 8, PERSONAL_WEIGHT 0.15, PPR_WEIGHT 0.1). Raw output:
+`eval/results/agent-20261107-164919.json`.
+
+### Personalized retrieval
+
+12 ambiguous questions (`eval/personalization_dataset.jsonl`), for example "What does
+recall mean?" after asking about evaluation metrics vs after asking about HNSW.
+The expected source file is scored over all passages the model reads.
+
+| | hit@1 | hit@3 | MRR | share of passages from the right file |
+|---|---|---|---|---|
+| hybrid retrieval (no profile) | 0.500 | 0.500 | 0.510 | 0.125 |
+| **personalized GraphRAG** | **0.667** | **0.833** | **0.758** | **0.235** |
+
+Regression check: the 17 normal eval questions run with a profile from *unrelated* history.
+
+| | recall | MRR |
+|---|---|---|
+| no profile | 1.000 | 0.782 |
+| LangChain profile | 1.000 | 0.780 |
+| vector-DB profile | 1.000 | 0.783 |
+
+Personalization is additive: the question's own top k are always kept. So an
+unrelated profile costs no recall. Weight sweep:
+
+| PERSONAL / PPR | ambiguous MRR | regression MRR |
+|---|---|---|
+| 0.15 / 0.0 | 0.60 | — |
+| **0.15 / 0.1** (default) | **0.76** | **0.78** |
+| 0.25 / 0.2 | 0.78 | 0.71–0.72 |
+| 0.35 / 0.2 | 0.83 | 0.71–0.73 |
+
+The personalized PageRank term is what lifts hit@1 from 0.50 to 0.67, as the
+0.15 / 0.0 row shows. Larger weights help on ambiguous questions but lower MRR
+on ordinary questions.
+
+### Multi-step sessions
+
+4 persona sessions (vector DBs, evaluation, chunking, LangChain), 10 steps each.
+The simulated user clicks the suggestion closest to their persona, then asks an
+11th question to test the limit.
+
+| Metric | personalized | personalization off |
+|---|---|---|
+| steps completed | 10 / 10 | 10 / 10 |
+| step limit enforced (11th refused) | 1.00 | 1.00 |
+| final chat summary written | 1.00 | 1.00 |
+| follow-ups per turn (max) | 3.0 (3) | 3.0 (3) |
+| chosen follow-ups answered | 1.00 | 1.00 |
+| ...answered from local docs | 1.00 | 1.00 |
+| duplicate questions (cos ≥ 0.86) | 0.00 | 0.00 |
+| novelty (1 − max cos to earlier questions) | 0.281 | 0.311 |
+| persona alignment (own − other personas) | 0.397 | 0.391 |
+| suggestions nearest their own persona | 0.917 | 0.935 |
+| refusal rate | 0.00 | 0.00 |
+| **NLI faithfulness of answers** | **0.703** | 0.620 |
+| **lexical grounding** | **0.619** | 0.514 |
+| seconds per turn | 4.95 | 4.52 |
+
+**Follow-up safety.** Of 108 suggestions, 0.991 passed the full policy guard
+(regex + LLM judge) and 0.982 passed the intent gate. The 3 flagged were benign
+over-blocks: two pgvector/PostgreSQL questions the intent gate called
+unsupported, and one pass@k question the LLM judge flagged. A clicked follow-up
+is checked by both gates again, so over-blocking is the safe direction.
+
+**Takeaways:**
+
+- **Follow-up mechanics are solid.** Every turn offered 3 suggestions, every
+  chosen suggestion was answerable from the local store, the 10-step limit
+  held, and every chat was summarized.
+- **Suggestions follow the conversation in both variants.** They are generated
+  from the current answer and its passages, so they stay on persona either way
+  (0.92 vs 0.94).
+- **Personalization mainly improves answers.** Retrieval keeps passages from the
+  topic the user has been exploring, which raised faithfulness from 0.62 to
+  0.70 and grounding from 0.51 to 0.62. The cost is about 0.4 s per turn.
+
+**Mean milliseconds per layer** (personalized):
+
+| Layer | ms |
+|---|---|
+| safety (guard + intent) | 863 |
+| generation | 1264 |
+| follow-ups | 1219 |
+| summarization (when due) | 1504 |
+| retrieval | 211 |
+| memory | 3 |
+| context | 13 |
+| personalization | 13 |
+| eval | 1 |

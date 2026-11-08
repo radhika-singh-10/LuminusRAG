@@ -73,3 +73,19 @@ CHAT_DB_URL = os.getenv("CHAT_DB_URL", f"sqlite:///{ROOT / 'chats' / 'history.sq
 EVAL_DATASET = Path(os.getenv("EVAL_DATASET", ROOT / "eval" / "dataset.jsonl"))
 EVAL_RESULTS_DIR = Path(os.getenv("EVAL_RESULTS_DIR", ROOT / "eval" / "results"))
 NLI_MODEL = os.getenv("NLI_MODEL", "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli")
+
+# Agent harness (rag/agent): multi-step conversations with follow-up
+# suggestions and personalization from the conversation.
+AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "10"))         # questions per conversation
+AGENT_MAX_FOLLOWUPS = int(os.getenv("AGENT_MAX_FOLLOWUPS", "3"))  # suggestions per answer
+AGENT_MODEL = os.getenv("AGENT_MODEL", INTENT_MODEL)  # follow-ups + rolling summary (Ollama)
+FOLLOWUP_MIN_SCORE = float(os.getenv("FOLLOWUP_MIN_SCORE", "0.5"))  # cosine to an active chunk
+FOLLOWUP_MIN_RELEVANCE = float(os.getenv("FOLLOWUP_MIN_RELEVANCE", "0.25"))  # cosine to the question or answer
+SUMMARY_EVERY = int(os.getenv("SUMMARY_EVERY", "3"))  # refresh the rolling summary every N steps
+AGENT_ONLINE_NLI = os.getenv("AGENT_ONLINE_NLI", "false").lower() == "true"  # NLI per turn
+# Personalization: interests = graph entities the user asked about, decayed per step
+PERSONALIZE = os.getenv("PERSONALIZE", "true").lower() == "true"
+INTEREST_DECAY = float(os.getenv("INTEREST_DECAY", "0.8"))
+PERSONAL_WEIGHT = float(os.getenv("PERSONAL_WEIGHT", "0.15"))  # profile similarity in ranking
+PPR_WEIGHT = float(os.getenv("PPR_WEIGHT", "0.1"))             # personalized PageRank in ranking
+LONG_TERM_WEIGHT = float(os.getenv("LONG_TERM_WEIGHT", "0.3"))  # interests from the user's other chats

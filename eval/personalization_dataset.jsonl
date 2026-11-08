@@ -1,0 +1,12 @@
+{"id": "p01", "persona": "evaluation", "history": ["What is mean reciprocal rank?", "What is pass@k?"], "question": "What does recall mean?", "expected_source": "evaluation_metrics.md"}
+{"id": "p02", "persona": "vector_db", "history": ["What is HNSW?", "How does metadata filtering work in a vector database?"], "question": "What does recall mean?", "expected_source": "vector_databases.md"}
+{"id": "p03", "persona": "vector_db", "history": ["What is HNSW?", "How does metadata filtering work in a vector database?"], "question": "What is the main cost?", "expected_source": "vector_databases.md"}
+{"id": "p04", "persona": "chunking", "history": ["What is semantic chunking?", "What is fixed-size chunking?"], "question": "What is the main cost?", "expected_source": "chunking.md"}
+{"id": "p05", "persona": "embeddings", "history": ["What are text embeddings?", "What is the maximum input length of an embedding model?"], "question": "What happens if you switch to a different model?", "expected_source": "embeddings.md"}
+{"id": "p06", "persona": "langchain", "history": ["What is LCEL?", "How do prompt templates work in LangChain?"], "question": "What happens if you switch to a different model?", "expected_source": "langchain_guide.md"}
+{"id": "p07", "persona": "chunking", "history": ["What is semantic chunking?", "What is fixed-size chunking?"], "question": "How do you choose the right size?", "expected_source": "chunking.md"}
+{"id": "p08", "persona": "embeddings", "history": ["What are text embeddings?", "What is the maximum input length of an embedding model?"], "question": "How do you choose the right size?", "expected_source": "embeddings.md"}
+{"id": "p09", "persona": "embeddings", "history": ["What are text embeddings?", "What is the maximum input length of an embedding model?"], "question": "How is similarity measured?", "expected_source": "embeddings.md"}
+{"id": "p10", "persona": "chunking", "history": ["What is semantic chunking?", "What is fixed-size chunking?"], "question": "How is similarity measured?", "expected_source": "chunking.md"}
+{"id": "p11", "persona": "vector_db", "history": ["What is HNSW?", "How does metadata filtering work in a vector database?"], "question": "How should updates be handled?", "expected_source": "vector_databases.md"}
+{"id": "p12", "persona": "embeddings", "history": ["What are text embeddings?", "What is the maximum input length of an embedding model?"], "question": "How should updates be handled?", "expected_source": "embeddings.md"}

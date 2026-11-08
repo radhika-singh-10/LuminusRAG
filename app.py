@@ -9,9 +9,9 @@ import pandas as pd
 import streamlit as st
 
 from rag import config
-from rag.chain import build_guarded_chain, get_llm
+from rag.chain import get_llm
 from rag.history import (
-    add_exchange, delete_chat, list_chats, load_messages, new_chat_id, redact_question,
+    delete_chat, list_chats, load_messages, new_chat_id, redact_question,
     summarize_all, summarize_chat, summarize_messages,
 )
 from rag.ingest import get_chunks, ingest, list_indexed, remove_source, save_upload
@@ -22,6 +22,16 @@ st.set_page_config(page_title="LuminusRAG", page_icon="✨", layout="wide")
 @st.cache_resource(show_spinner="Loading language model…")
 def cached_llm():
     return get_llm()
+
+
+@st.cache_resource(show_spinner="Starting the agent…")
+def cached_agent():
+    from rag.agent.harness import build_agent
+
+    return build_agent(cached_llm())
+
+
+USER_ID = "local"
 
 
 def source_label(meta: dict) -> str:
@@ -51,6 +61,10 @@ def answer_meta(result: dict) -> str:
         parts.append(f"🔒 redacted: {', '.join(result['pii_redacted'])}")
     if result.get("stored"):
         parts.append(f"💾 saved {result['stored']} web passages")
+    if result.get("step"):
+        parts.append(f"step {result['step']}/{result['max_steps']}")
+    if (m := result.get("metrics") or {}).get("lexical_grounding") is not None:
+        parts.append(f"grounding {m['lexical_grounding']:.2f}")
     if result.get("output_actions"):
         parts.append(f"🧹 answer cleaned: {'; '.join(result['output_actions'])}")
     guard = result.get("guard")
@@ -164,6 +178,22 @@ with st.sidebar:
         f"**Web fallback:** {'on (DuckDuckGo)' if config.WEB_FALLBACK else 'off'}"
         f"{', saves results' if config.WEB_FALLBACK and config.WEB_STORE else ''}"
     )
+
+    # ----- personalization -----
+    st.divider()
+    st.subheader("🎯 Your interests")
+    from rag.agent.memory import clear_interests, get_interests
+
+    interests = get_interests(USER_ID, st.session_state.get("chat_id"), top=8) if config.PERSONALIZE else []
+    if interests:
+        st.caption(" · ".join(f"**{i['name']}** {i['weight']:.1f}" for i in interests))
+        if st.button("Forget my interests", width="stretch"):
+            clear_interests(USER_ID)
+            st.rerun()
+    else:
+        st.caption("Learned from your questions (knowledge-graph entities). "
+                   "They personalize retrieval and follow-up suggestions."
+                   if config.PERSONALIZE else "Personalization is off.")
 
     # ----- chat history -----
     st.divider()
@@ -279,6 +309,18 @@ with tab_ask:
     if not docs:
         st.info("Upload a document in the **Upload & process** tab first.")
 
+    from rag.agent.memory import get_session
+
+    session = get_session(st.session_state.chat_id, USER_ID)
+    max_steps = config.AGENT_MAX_STEPS
+    steps, closed = session["steps"], bool(session.get("closed")) or session["steps"] >= max_steps
+    st.progress(min(steps / max_steps, 1.0), text=f"Step {steps}/{max_steps}"
+                + (" · conversation complete" if closed else ""))
+
+    def render_trace(trace: list[dict]) -> None:
+        with st.expander("🧰 Agent trace"):
+            st.dataframe(pd.DataFrame(trace), hide_index=True, width="stretch")
+
     chat = st.container()
     with chat:
         for m in messages:
@@ -288,22 +330,41 @@ with tab_ask:
                     st.caption(m["meta"])
                 if m.get("sources"):
                     render_sources(m["sources"])
+                if m.get("trace"):
+                    render_trace(m["trace"])
 
-    question = st.chat_input("Ask a question about your documents", disabled=not docs)
-    if question:
+    # Follow-up suggestions for the latest answer.
+    last = messages[-1] if messages and messages[-1]["role"] == "assistant" else None
+    if last and last.get("followups") and not closed:
+        st.caption("Suggested follow-ups")
+        cols = st.columns(len(last["followups"]))
+        for i, (col, f) in enumerate(zip(cols, last["followups"])):
+            if col.button(f["question"], key=f"fu-{len(messages)}-{i}", width="stretch"):
+                st.session_state.pending_question = f["question"]
+                st.rerun()
+    if closed:
+        st.info(f"This conversation reached its limit of {max_steps} questions. "
+                "Start a **New chat** in the sidebar; your interests carry over.")
+        if session.get("summary"):
+            with st.expander("Conversation summary", expanded=True):
+                st.markdown(session["summary"])
+
+    typed = st.chat_input("Ask a question about your documents", disabled=not docs or closed)
+    pending = st.session_state.pop("pending_question", None)
+    question, from_followup = (pending, True) if pending else (typed, False)
+    if question and not closed:
         question = redact_question(question)  # PII never shown back or saved
         messages.append({"role": "user", "content": question})
         with chat:
             with st.chat_message("user"):
                 st.markdown(question)
             with st.chat_message("assistant"):
-                # Built per question so the retriever sees freshly indexed files.
-                pipeline = build_guarded_chain(cached_llm())
+                agent = cached_agent()
                 status_line = st.empty()
                 final: dict = {}
 
                 def answer_tokens():
-                    for event in pipeline.events(question, history=messages[:-1]):
+                    for event in agent.events(st.session_state.chat_id, question, from_followup):
                         if event["type"] == "status":
                             status_line.caption(f"⏳ {event['message']}")
                         elif event["type"] == "token":
@@ -319,7 +380,6 @@ with tab_ask:
                     {"label": source_label(d.metadata), "text": d.page_content}
                     for d in result["context"]
                 ]
-                intent = result.get("intent")
                 meta_line = answer_meta(result)
                 if meta_line:
                     st.caption(meta_line)
@@ -327,13 +387,16 @@ with tab_ask:
                     st.warning(f"Web search failed: {result['web_error']}")
                 if sources:
                     render_sources(sources)
+        # The harness already saved the exchange (memory layer).
         messages.append({
             "role": "assistant",
             "content": result["answer"],
             "sources": sources,
             "meta": meta_line,
+            "followups": result.get("followups", []),
+            "trace": result.get("trace", []),
         })
-        add_exchange(st.session_state.chat_id, question, result["answer"], meta_line, sources)
+        st.rerun()  # show follow-up buttons, step count and interests
 
 # ---------- history ----------
 

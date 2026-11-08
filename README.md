@@ -133,6 +133,12 @@ LuminusRAG/
 │   ├── rerank.py        # cross-encoder reranking
 │   ├── followup.py      # history-aware rewriting of follow-up questions
 │   ├── chain.py         # retriever + prompt + LLM (LCEL)
+│   ├── agent/           # agent harness: every layer a LangChain tool, run by LangGraph
+│   │   ├── harness.py   # LangGraph state machine, step limit, streaming, trace
+│   │   ├── tools.py     # memory / safety / context / retrieval / personalization / follow-ups / summary / eval tools
+│   │   ├── personalize.py # interest profile -> personalized GraphRAG (ANN + personalized PageRank)
+│   │   ├── followups.py # grounded, novel, safe follow-up suggestions (max 3)
+│   │   └── memory.py    # session state (steps, rolling summary) + interest profile tables
 │   └── eval/
 │       ├── dataset.py   # JSONL eval set loader
 │       ├── metrics.py   # retrieval, token P/R/F1, pass@k, pass^k, ...
@@ -141,11 +147,14 @@ LuminusRAG/
 │       ├── guard_eval.py    # policy guard on labeled attack / benign questions
 │       ├── llm_judge.py     # LLM-as-judge correctness + agreement / kappa
 │       ├── security_eval.py # full-pipeline PII + prompt-injection eval
+│       ├── agent_eval.py # personalization + 10-step follow-up sessions
 │       ├── runner.py    # single eval run -> report
 │       └── harness.py   # multi-variant experiments + comparison table
 ├── eval/
 │   ├── dataset.jsonl    # labeled questions
 │   ├── intent_dataset.jsonl # labeled allowed / blocked queries
+│   ├── personalization_dataset.jsonl # ambiguous questions whose answer depends on the user's history
+│   ├── agent_sessions.jsonl # persona sessions for the multi-step eval
 │   ├── experiments.json # variants for `bench`
 │   └── results/         # run outputs (gitignored)
 ├── policies/
@@ -185,6 +194,9 @@ python main.py versions                        # document versions (active / bui
 python main.py gc                              # garbage-collect retired versions now
 python main.py ask "What are the pipeline stages of RAG?"
 python main.py chat                            # interactive
+python main.py agent                           # multi-step agent: follow-up suggestions, 10 steps max
+python main.py agent --trace                   # ...with the per-layer tool trace
+python main.py eval-agent --compare            # personalization + session eval (vs personalization off)
 python main.py eval -n 5 -k 1,3,5              # evaluate on eval/dataset.jsonl
 python main.py bench                           # run + compare variants in eval/experiments.json
 python main.py bench --only baseline,mmr -v
@@ -205,7 +217,9 @@ The web UI has four tabs:
 - **Upload & process**: drop PDFs/TXT/MD; each file is processed automatically
   with live steps (save → extract → split → embed + store) and a per-file
   report (pages, characters, chunks, time).
-- **Ask**: chat with your documents; every answer shows its sources and pages.
+- **Ask**: chat with your documents through the agent harness; every answer
+  shows its sources, up to 3 follow-up buttons, the step counter (10 max) and
+  an agent trace. The sidebar shows the interests learned from the conversation.
 - **Documents**: indexed files, their chunks, and a remove button.
 - **Evaluate**: run the eval harness and view accuracy, pass@k / pass^k,
   retrieval, truthfulness, and per-question results.
@@ -213,6 +227,89 @@ The web UI has four tabs:
 Ingestion is incremental and versioned: unchanged files are skipped, an edited
 file re-embeds only the chunks that changed, and deleted files are retired and
 cleaned up in the background (see Versioned ingestion).
+
+## Agent harness (multi-step conversations)
+
+The Ask tab and `python main.py agent` run every question through an agent
+harness (`rag/agent/`). Each layer is a typed LangChain tool, and a
+LangGraph state machine calls them in a fixed order. Safety has to run before
+anything else sees the question, so a model doesn't choose the order. A conversation:
+
+1. The user asks a question. The harness answers it from the retrieved
+   documents and suggests **up to 3 follow-up questions**.
+2. The user clicks a suggestion or types their own question.
+3. Up to **10 steps** per chat (`AGENT_MAX_STEPS`). The chat then closes with a
+   summary, and further questions get "start a new chat". Interests carry over.
+
+Every turn also teaches the harness what the user is exploring. These
+**interests** personalize retrieval and the follow-up suggestions.
+
+```mermaid
+flowchart LR
+    Q([question]) --> M[memory<br/>recall_memory]
+    M -->|step limit reached| X([start a new chat])
+    M --> S[safety<br/>safety_check]
+    S -->|unsafe| SV
+    S --> C[context<br/>build_context + contextualize]
+    C --> I[intent<br/>intent_check]
+    I -->|not AI| SV
+    I --> R[retrieval<br/>personalized GraphRAG]
+    R --> A[answer<br/>stream + web fallback]
+    A --> P[personalization<br/>update_interests]
+    P --> F[follow-ups<br/>suggest_followups ≤3]
+    F --> SU[summarization<br/>rolling summary]
+    SU --> E[eval<br/>evaluate_turn]
+    E --> SV[memory<br/>save_turn]
+    SV --> O([answer + follow-ups + trace])
+```
+
+| Layer | Tool | What it does |
+|---|---|---|
+| memory | `recall_memory`, `save_turn` | LangChain SQL chat history, session state (step count, rolling summary, closed), interest profile |
+| safety | `safety_check`, `intent_check` | policy guard (injection + PII, regex + LLM judge) on the raw question; AI-only intent gate |
+| context | `build_context`, `contextualize` | last 3 exchanges + rolling summary of older ones + interests, within a character budget; follow-ups rewritten to standalone questions (the rewrite must pass the guard again) |
+| retrieval | `retrieve` | personalized GraphRAG (below) |
+| generation | `generate_answer` | streamed, sanitized answer with citations; web fallback when the store can't answer |
+| personalization | `update_interests` | decays interests ×0.8 per step, adds the entities this question was about |
+| follow-ups | `suggest_followups` | ≤3 suggestions: grounded, novel, safe, on topic (below) |
+| summarization | `summarize_session` | rolling summary every 3 steps once turns leave the recent window; final chat summary at the step limit |
+| eval | `evaluate_turn` | online signals per turn: retrieval score, refusal, citations, lexical grounding, follow-up answerability (NLI faithfulness with `AGENT_ONLINE_NLI=true`) |
+
+Every tool call is traced: layer, tool, milliseconds and a short note. The
+UI shows the trace under each answer, and `agent --trace` prints it.
+
+**Personalized GraphRAG.** The user's interests are knowledge-graph entities:
+
+- **Where interests come from.** Each turn adds the entities the question names, found by
+  ANN search over entity-name embeddings. With a lower weight it also adds entities from the top answering
+  chunks, but only those close to the question, so "Google" in a passage doesn't become an interest.
+- **What's stored.** Only entity keys, never question text, so the profile holds no PII.
+- **How retrieval uses them:**
+  1. **ANN:** a second vector search runs with the question embedding nudged toward the profile vector.
+  2. **Personalized PageRank:** runs on the graph, restarting at the question's entities and the interests.
+     Each chunk scores the PageRank mass of its entities.
+  3. **Ranking:** `cos(q, chunk) + 0.15·cos(profile, chunk) + 0.1·PPR(chunk)`.
+  4. **Additive:** the question's own top-k chunks are always kept. The profile adds up to 2 chunks and
+     sets the order, so an unrelated profile can't push the answer out.
+
+  On ambiguous questions ("What does recall mean?" after asking about HNSW, or after asking about MRR)
+  personalization picks the right source more often (hit@1 0.50 → 0.67, MRR 0.51 → 0.76). On normal
+  questions it costs no recall (1.00). Over 10-step sessions it raised answer faithfulness from 0.62 to
+  0.70. Full tables are in [results.md](results.md).
+
+**Follow-up suggestions.** The local Ollama model proposes 5 candidates from
+the answer, the top passages and the interests. Knowledge-graph relations
+supply templated candidates ("How does X relate to Y?") that only fill empty
+slots. Every candidate must pass all of these checks:
+
+- **Format:** one question, 4–25 words.
+- **Safety:** the policy regex rules. A clicked follow-up is a normal question, so it then goes through the full guard and intent gate again.
+- **Novelty:** cosine below 0.86 to everything already asked and to other suggestions.
+- **Answerable:** an active chunk scores at least `FOLLOWUP_MIN_SCORE`.
+- **On topic:** at least `FOLLOWUP_MIN_RELEVANCE` against the question or answer.
+
+Survivors are ranked by answerability, relevance and interest. On the last
+step no suggestions are made.
 
 ## Versioned ingestion
 
@@ -504,6 +601,11 @@ Each run writes `per_question.jsonl` and `summary.json` under `eval/results/`.
 | `WEB_MAX_RESULTS` / `WEB_FETCH_PAGES` / `WEB_TIMEOUT` | `5` / `3` / `10` s |
 | `CHAT_DB_URL` | `sqlite:///chats/history.sqlite` |
 | `NLI_MODEL` | `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` |
+| `AGENT_MAX_STEPS` / `AGENT_MAX_FOLLOWUPS` / `AGENT_MODEL` | `10` / `3` / `llama3.2:3b` |
+| `FOLLOWUP_MIN_SCORE` / `FOLLOWUP_MIN_RELEVANCE` | `0.5` / `0.25` (cosine) |
+| `SUMMARY_EVERY` / `AGENT_ONLINE_NLI` | `3` / `false` |
+| `PERSONALIZE` / `INTEREST_DECAY` / `LONG_TERM_WEIGHT` | `true` / `0.8` / `0.3` |
+| `PERSONAL_WEIGHT` / `PPR_WEIGHT` | `0.15` / `0.1` |
 | `DATA_DIR` / `PERSIST_DIR` | `./data` / `./chroma_db` |
 
 ## How it works

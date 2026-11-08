@@ -1,4 +1,4 @@
-"""LuminusRAG CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security | graph | gc | versions | chunks"""
+"""LuminusRAG CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security | graph | gc | versions | chunks | agent | eval-agent"""
 import argparse
 import sys
 from pathlib import Path
@@ -56,6 +56,59 @@ def print_result(result: dict, answer_shown: bool = False) -> None:
     print()
 
 
+def agent_loop(chat_id: str | None, user_id: str, show_trace: bool) -> int:
+    """Interactive multi-step session: type a question, or 1-3 to take a suggestion."""
+    from rag.agent.harness import build_agent
+    from rag.history import new_chat_id
+
+    agent = build_agent(user_id=user_id)
+    chat_id = chat_id or new_chat_id()
+    print(f"Chat {chat_id}: up to {agent.max_steps} questions. Type a question, "
+          f"a number to take a suggested follow-up, or 'quit'.\n")
+    followups: list[dict] = []
+    while True:
+        try:
+            line = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if line.lower() in {"quit", "exit", "q"}:
+            return 0
+        if not line:
+            continue
+        from_fu = line.isdigit() and 1 <= int(line) <= len(followups)
+        question = followups[int(line) - 1]["question"] if from_fu else line
+        if from_fu:
+            print(f"   → {question}")
+        result = stream_answer(_AgentEvents(agent, chat_id, from_fu), question)
+        print_result(result, answer_shown=True)
+        if result.get("interests"):
+            print("[interests: " + ", ".join(i["name"] for i in result["interests"][:5]) + "]")
+        if show_trace:
+            for t in result["trace"]:
+                print(f"  · {t['layer']:<15} {t['tool']:<18} {t['ms']:>6} ms  {t.get('note', '')}")
+        print(f"[step {result['step']}/{result['max_steps']}]")
+        followups = result["followups"]
+        for i, f in enumerate(followups, 1):
+            print(f"  {i}. {f['question']}")
+        if result.get("closed"):
+            if result.get("summary"):
+                print(f"\nConversation summary:\n{result['summary']}")
+            print("\nThis conversation is complete. Start a new one with: python main.py agent")
+            return 0
+        print()
+
+
+class _AgentEvents:
+    """Adapts the harness to stream_answer's chain.events(question, history) call."""
+
+    def __init__(self, agent, chat_id: str, from_followup: bool):
+        self.agent, self.chat_id, self.from_followup = agent, chat_id, from_followup
+
+    def events(self, question: str, history=None):
+        return self.agent.events(self.chat_id, question, self.from_followup)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="LuminusRAG: guarded GraphRAG for AI questions")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -95,6 +148,16 @@ def main() -> int:
     eg = sub.add_parser("eval-guard", help="Measure the policy guard on labeled attack/benign questions")
     eg.add_argument("--no-llm", action="store_true", help="Regex rules only")
     sub.add_parser("eval-intent", help="Measure the Ollama intent gate on labeled queries")
+    ag = sub.add_parser("agent", help="Multi-step agent chat with follow-up suggestions (max 10 steps)")
+    ag.add_argument("--chat", default=None, help="Continue a saved chat id")
+    ag.add_argument("--user", default="local", help="User id for the interest profile")
+    ag.add_argument("--trace", action="store_true", help="Print the tool trace per turn")
+    ea = sub.add_parser("eval-agent", help="Evaluate personalization and multi-step follow-up sessions")
+    ea.add_argument("--steps", type=int, default=None, help="Steps per session (default AGENT_MAX_STEPS)")
+    ea.add_argument("--limit", type=int, default=None, help="Only the first N sessions")
+    ea.add_argument("--compare", action="store_true", help="Also run sessions with personalization off")
+    ea.add_argument("--no-sessions", action="store_true", help="Personalized retrieval only")
+    ea.add_argument("--no-retrieval", action="store_true", help="Sessions only")
     bench = sub.add_parser("bench", help="Run and compare eval variants from an experiments file")
     bench.add_argument("--config", type=Path, default=config.ROOT / "eval" / "experiments.json")
     bench.add_argument("--only", default=None, help="Comma-separated variant names")
@@ -110,6 +173,16 @@ def main() -> int:
         ingest(rebuild=args.rebuild)
         wait_for_gc()  # the background GC must finish before this process exits
         return 0
+
+    if args.cmd == "eval-agent":
+        from rag.eval.agent_eval import print_agent_report, run_agent_eval
+
+        print_agent_report(run_agent_eval(sessions=not args.no_sessions, retrieval=not args.no_retrieval,
+                                          compare=args.compare, steps=args.steps, limit=args.limit))
+        return 0
+
+    if args.cmd == "agent":
+        return agent_loop(args.chat, args.user, args.trace)
 
     if args.cmd == "gc":
         from rag.versioning import collect_garbage

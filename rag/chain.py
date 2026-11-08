@@ -216,11 +216,9 @@ class GuardedPipeline:
     def events(self, question: str, history: list[dict] | None = None):
         """history: earlier messages [{role, content}], oldest first, used to
         rewrite follow-up questions (see rag/followup.py)."""
-        from .eval.metrics import is_refusal
         from .intent import Intent
         from .policy import check_query
         from .safety import strip_redactions
-        from .web import store_web_documents, web_documents
 
         def blocked(q: str, intent, pii: list[str], guard=None):
             result = {"question": q, "context": [], "answer": intent.message, "intent": intent,
@@ -261,10 +259,19 @@ class GuardedPipeline:
 
         yield {"type": "status", "stage": "retrieve", "message": "Searching your documents…"}
         docs = self.retriever.invoke(question)
-        score = _best_score(question, docs)
-        result = {"question": question, "intent": intent, "local_score": score,
-                  "pii_redacted": pii, "stored": 0, "guard": guard,
+        result = {"intent": intent, "pii_redacted": pii, "guard": guard,
                   "standalone_question": standalone}
+        yield from self.answer_events(docs, question, result)
+
+    def answer_events(self, docs: list, question: str, result: dict | None = None):
+        """Answer from already-retrieved docs: local answer, else web fallback
+        (and store), else the refusal. Yields status/token events and a final
+        event whose result is `result` plus the answer fields."""
+        from .eval.metrics import is_refusal
+        from .web import store_web_documents, web_documents
+
+        score = _best_score(question, docs)
+        result = {**(result or {}), "question": question, "local_score": score, "stored": 0}
 
         if docs and (score >= config.WEB_MIN_SCORE or not config.WEB_FALLBACK):
             yield {"type": "status", "stage": "generate", "message": "Answering from your documents…"}

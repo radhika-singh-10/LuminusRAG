@@ -91,14 +91,17 @@ def redact_question(text: str) -> str:
 # ---------- writing ----------
 
 def add_exchange(chat_id: str, question: str, answer: str,
-                 meta: str = "", sources: list[dict] | None = None) -> None:
-    """Append one question/answer pair. `question` should already be redacted."""
+                 meta: str = "", sources: list[dict] | None = None,
+                 extra: dict | None = None) -> None:
+    """Append one question/answer pair. `question` should already be redacted.
+    `extra` (e.g. follow-up suggestions, step) is stored with the answer."""
     history = get_history(chat_id)
     history.add_messages([
         HumanMessage(content=question),
         AIMessage(content=answer, additional_kwargs={
             "meta": meta,
             "sources": [{"label": s["label"], "text": s["text"][:300]} for s in sources or []],
+            **(extra or {}),
         }),
     ])
     now = datetime.now().isoformat(timespec="seconds")
@@ -116,6 +119,9 @@ def add_exchange(chat_id: str, question: str, answer: str,
 
 def delete_chat(chat_id: str) -> None:
     get_history(chat_id).clear()
+    from .agent.memory import delete_session
+
+    delete_session(chat_id)
     with _engine().begin() as conn:
         conn.execute(chat_meta.delete().where(chat_meta.c.id == chat_id))
 
@@ -130,6 +136,8 @@ def to_ui(message: BaseMessage) -> dict:
         "content": message.content,
         "meta": extra.get("meta", ""),
         "sources": extra.get("sources", []),
+        "followups": extra.get("followups", []),
+        "step": extra.get("step"),
     }
 
 

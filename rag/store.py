@@ -71,3 +71,14 @@ def get_retriever(k: int | None = None):
 
         retriever = RerankRetriever(base=retriever, k=k)
     return retriever
+
+
+def distance_to_cosine(store: Chroma, distance: float) -> float:
+    """Chroma distance -> cosine similarity for unit-length embeddings. The
+    metric depends on how the collection was created (older stores use l2)."""
+    try:
+        space = (store._collection.configuration_json.get("hnsw") or {}).get("space")
+    except Exception:
+        space = None
+    space = space or (store._collection.metadata or {}).get("hnsw:space", "l2")
+    return 1 - distance / 2 if space == "l2" else 1 - distance

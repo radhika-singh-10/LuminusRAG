@@ -75,12 +75,16 @@ def conversation_text(history: list[dict], turns: int | None = None) -> str:
         for m in to_messages(history, turns))
 
 
-def standalone_question(question: str, history: list[dict] | None) -> str:
-    """Rewrite a follow-up using the history; otherwise return the question as is."""
+def standalone_question(question: str, history: list[dict] | None, summary: str | None = None) -> str:
+    """Rewrite a follow-up using the history (and the rolling summary of older
+    turns, if any); otherwise return the question as is."""
     if not (config.HISTORY_AWARE and history and looks_like_followup(question)):
         return question
+    conversation = conversation_text(history)
+    if summary:
+        conversation = f"(Earlier: {' '.join(summary.split())[:400]}) / {conversation}"
     try:
-        out = _contextualizer().invoke({"conversation": conversation_text(history), "question": question})
+        out = _contextualizer().invoke({"conversation": conversation, "question": question})
     except Exception:  # Ollama unavailable: fall back to the original question
         return question
     out = out.strip().strip('"').strip()
