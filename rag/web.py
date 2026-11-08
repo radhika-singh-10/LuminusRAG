@@ -146,14 +146,30 @@ def clean_passage(text: str) -> str | None:
     return redact_pii(text)[0]
 
 
+_AI_TERMS = re.compile(
+    r"\b(?:ai|a\.i\.|artificial intelligence|llms?|language models?|gpt\w*|claude|gemini|llama|"
+    r"transformers?|neural|deep learning|machine learning|ml|nlp|rag|embeddings?|vector|"
+    r"langchain|langgraph|prompts?|agents?|agentic|chatbots?|fine-?tun\w*|rlhf|diffusion|"
+    r"tokens?|inference|attention|model)\b", re.IGNORECASE)
+
+
+def search_query(query: str) -> str:
+    """Every allowed question is about AI, but ambiguous wording ("latest
+    guardrail mechanisms") would search the general web (highway guardrails).
+    Without an AI term in the question, add the AI context to the search."""
+    return query if _AI_TERMS.search(query) else f"{query} in AI and large language models"
+
+
 def web_documents(query: str, k: int | None = None) -> tuple[list[Document], dict]:
     """Search, fetch, clean and rank. Returns (top-k passages, stats).
 
     `query` must already be PII-redacted: it is sent to the search engine.
     """
     k = k or config.TOP_K
-    stats = {"results": 0, "pages_fetched": 0, "passages": 0, "dropped_injection": 0}
-    results = web_search(strip_redactions(query))
+    query = search_query(strip_redactions(query))
+    stats = {"results": 0, "pages_fetched": 0, "passages": 0, "dropped_injection": 0,
+             "search_query": query}
+    results = web_search(query)
     stats["results"] = len(results)
     if not results:
         return [], stats

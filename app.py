@@ -314,8 +314,9 @@ with tab_ask:
     session = get_session(st.session_state.chat_id, USER_ID)
     max_steps = config.AGENT_MAX_STEPS
     steps, closed = session["steps"], bool(session.get("closed")) or session["steps"] >= max_steps
-    st.progress(min(steps / max_steps, 1.0), text=f"Step {steps}/{max_steps}"
-                + (" · conversation complete" if closed else ""))
+    step_bar = st.empty()
+    step_bar.progress(min(steps / max_steps, 1.0), text=f"Step {steps}/{max_steps}"
+                      + (" · conversation complete" if closed else ""))
 
     def render_trace(trace: list[dict]) -> None:
         with st.expander("🧰 Agent trace"):
@@ -355,6 +356,9 @@ with tab_ask:
     if question and not closed:
         question = redact_question(question)  # PII never shown back or saved
         messages.append({"role": "user", "content": question})
+        # The turn counts as soon as it is asked (the harness saves it at the end).
+        step_bar.progress(min((steps + 1) / max_steps, 1.0),
+                          text=f"Step {steps + 1}/{max_steps} · working…")
         with chat:
             with st.chat_message("user"):
                 st.markdown(question)
@@ -368,7 +372,6 @@ with tab_ask:
                         if event["type"] == "status":
                             status_line.caption(f"⏳ {event['message']}")
                         elif event["type"] == "token":
-                            status_line.empty()
                             yield event["text"]  # already sanitized, segment by segment
                         elif event["type"] == "final":
                             final.update(event["result"])
