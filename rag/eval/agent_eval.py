@@ -38,6 +38,7 @@ import numpy as np
 
 from .. import config
 from .harness import overrides
+from .latency import fmt_stats, latency_stats
 
 PERSONALIZATION_DATASET = config.ROOT / "eval" / "personalization_dataset.jsonl"
 SESSIONS_DATASET = config.ROOT / "eval" / "agent_sessions.jsonl"
@@ -161,7 +162,12 @@ def run_session(agent, spec: dict, personas: dict[str, np.ndarray], steps: int, 
     try:
         for _ in range(steps):
             t0 = time.perf_counter()
-            r = agent.turn(chat_id, question, from_followup=from_fu)
+            r, ttft = None, None
+            for e in agent.events(chat_id, question, from_fu):
+                if e["type"] == "token" and ttft is None:
+                    ttft = (time.perf_counter() - t0) * 1000
+                elif e["type"] == "final":
+                    r = e["result"]
             turns.append({"step": r["step"], "question": question, "from_followup": from_fu,
                           "standalone": r.get("standalone_question"), "answer": r["answer"],
                           "origin": r.get("origin"), "refused": r.get("origin") in (None, "none")
@@ -169,7 +175,9 @@ def run_session(agent, spec: dict, personas: dict[str, np.ndarray], steps: int, 
                           "context": [d.page_content for d in r["context"]],
                           "followups": r["followups"], "metrics": r["metrics"], "trace": r["trace"],
                           "interests": [i["name"] for i in r["interests"][:5]],
-                          "seconds": round(time.perf_counter() - t0, 2)})
+                          "seconds": round(time.perf_counter() - t0, 2),
+                          "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
+                          "ttft_ms": round(ttft, 1) if ttft is not None else None})
             asked.append(question)
             if verbose:
                 print(f"    step {r['step']:>2} [{r.get('origin')}] {question[:70]}"
@@ -256,16 +264,33 @@ def _layer_latency(sessions: list[dict]) -> dict:
     return {k: round(statistics.fmean(v)) for k, v in sorted(by.items())}
 
 
+def _latency(sessions: list[dict]) -> dict:
+    """Turn latency, time to first token, and p50/p95 per harness layer."""
+    turns = [t for s in sessions for t in s["turns"]]
+    by: dict[str, list[float]] = {}
+    for t in turns:
+        per_turn: dict[str, float] = {}
+        for e in t["trace"]:
+            per_turn[e["layer"]] = per_turn.get(e["layer"], 0) + e["ms"]
+        for k, v in per_turn.items():
+            by.setdefault(k, []).append(v)
+    return {"turn_ms": latency_stats(t["latency_ms"] for t in turns),
+            "ttft_ms": latency_stats(t["ttft_ms"] for t in turns),
+            "layers": {k: latency_stats(v) for k, v in sorted(by.items())}}
+
+
 def eval_sessions(path: Path = SESSIONS_DATASET, steps: int | None = None, limit: int | None = None,
                   verbose: bool = True) -> dict:
     from ..agent.harness import build_agent
     from ..chain import get_llm
     from ..store import get_embeddings
 
-    specs = _load(path)[:limit] if limit else _load(path)
+    all_specs = _load(path)
+    specs = all_specs[:limit] if limit else all_specs
     steps = steps or config.AGENT_MAX_STEPS
     emb = get_embeddings()
-    personas = {s["persona"]: np.asarray(emb.embed_query(s["description"])) for s in specs}
+    # Persona vectors from the whole dataset, so alignment has others to compare with.
+    personas = {s["persona"]: np.asarray(emb.embed_query(s["description"])) for s in all_specs}
     agent = build_agent(get_llm(), max_steps=steps, user_id="eval-agent")
     sessions = []
     for spec in specs:
@@ -284,6 +309,7 @@ def eval_sessions(path: Path = SESSIONS_DATASET, steps: int | None = None, limit
     summary["followup_safety"] = _safety_of([q for s in sessions for q in s["suggestions"]])
     summary["faithfulness"] = _faithfulness(sessions)
     summary["layer_ms"] = _layer_latency(sessions)
+    summary["latency"] = _latency(sessions)
     return {"summary": summary, "sessions": sessions}
 
 
@@ -347,5 +373,9 @@ def print_agent_report(out: dict) -> None:
             fs = s["summary"]["followup_safety"]
             print(f"  [{n}] follow-up safety: {fs['n']} suggestions, guard safe {f(fs['guard_safe'])}, "
                   f"intent allowed {f(fs['intent_allowed'])}")
-            print(f"  [{n}] mean ms per layer: {s['summary']['layer_ms']}")
+            lat = s["summary"].get("latency") or {}
+            print(f"  [{n}] turn latency: {fmt_stats(lat.get('turn_ms'))}")
+            print(f"  [{n}] time to first token: {fmt_stats(lat.get('ttft_ms'))}")
+            for layer, st in (lat.get("layers") or {}).items():
+                print(f"  [{n}]   {layer:<16} p50 {st['p50']} ms · p95 {st['p95']} ms")
     print(f"\nSaved to {out.get('path')}  ({out.get('seconds')}s)")

@@ -12,6 +12,7 @@ from pathlib import Path
 from .. import config
 from ..policy import check_query
 from . import metrics as M
+from .latency import fmt_stats, latency_stats
 
 
 def run_guard_eval(path: Path | None = None, use_llm: bool | None = None) -> dict:
@@ -23,8 +24,11 @@ def run_guard_eval(path: Path | None = None, use_llm: bool | None = None) -> dic
     sources: Counter = Counter()
     misses = []
     t0 = time.time()
+    lat = []
     for item in items:
+        t1 = time.perf_counter()
         g = check_query(item["question"], use_llm=use_llm)
+        lat.append((time.perf_counter() - t1) * 1000)
         if g.source == "error":
             errors += 1
         blocked, should_block = not g.safe, not item["safe"]
@@ -47,6 +51,9 @@ def run_guard_eval(path: Path | None = None, use_llm: bool | None = None) -> dic
         "benign_allowed": f"{tn}/{tn + fp}",
         "blocked_by": dict(sources),
         "seconds_per_query": round((time.time() - t0) / n, 2),
+        "latency_ms": latency_stats(lat),
+        "latency_blocked_ms": latency_stats(x for x, i in zip(lat, items) if not i["safe"]),
+        "latency_allowed_ms": latency_stats(x for x, i in zip(lat, items) if i["safe"]),
         "misses": misses,
     }
     mode = "regex only" if use_llm is False else f"regex + {config.GUARD_MODEL}"
@@ -56,7 +63,9 @@ def run_guard_eval(path: Path | None = None, use_llm: bool | None = None) -> dic
     print(f"  {'attacks blocked':<18} {report['attacks_blocked']}")
     print(f"  {'benign allowed':<18} {report['benign_allowed']}")
     print(f"  {'blocked by':<18} {report['blocked_by']}")
-    print(f"  {'secs per query':<18} {report['seconds_per_query']}")
+    print(f"  {'latency':<18} {fmt_stats(report['latency_ms'])}")
+    print(f"  {'  attacks':<18} {fmt_stats(report['latency_blocked_ms'])}")
+    print(f"  {'  benign':<18} {fmt_stats(report['latency_allowed_ms'])}")
     for m in misses:
         print(f"  MISS [{m['got']}, {m['rule'] or '-'} via {m['via'] or '-'}] {m['type']}: {m['question'][:90]}")
     return report

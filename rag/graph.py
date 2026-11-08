@@ -87,11 +87,10 @@ EXTRACT_PROMPT = ChatPromptTemplate.from_messages([
 
 @lru_cache(maxsize=1)
 def _extractor():
-    from langchain_ollama import ChatOllama
+    from .prompt_cache import chat_ollama
 
-    llm = ChatOllama(model=config.GRAPH_MODEL, base_url=config.OLLAMA_BASE_URL,
-                     temperature=0, num_predict=700)
-    return EXTRACT_PROMPT | llm.with_structured_output(Extraction)
+    llm = chat_ollama(config.GRAPH_MODEL, temperature=0, num_predict=700)
+    return (EXTRACT_PROMPT | llm.with_structured_output(Extraction)).with_config(run_name="graph_extractor")
 
 
 def key(name: str) -> str:
@@ -322,8 +321,8 @@ class HybridRetriever(BaseRetriever):
                                 run_manager: CallbackManagerForRetrieverRun) -> list[Document]:
         graph_docs = graph_documents(query)
         if self.mode == "graph":
-            return graph_docs or self.vector.invoke(query)
-        docs = self.vector.invoke(query)
+            return graph_docs or self.vector.invoke(query, {"callbacks": run_manager.get_child()})
+        docs = self.vector.invoke(query, {"callbacks": run_manager.get_child()})
         seen = {d.page_content for d in docs}
         facts = [d for d in graph_docs if d.metadata.get("origin") == "graph"]
         extra = [d for d in graph_docs if d.metadata.get("origin") != "graph"

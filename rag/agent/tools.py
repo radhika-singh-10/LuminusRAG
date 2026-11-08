@@ -31,10 +31,9 @@ from .. import config
 
 @lru_cache(maxsize=1)
 def _ollama():
-    from langchain_ollama import ChatOllama
+    from ..prompt_cache import chat_ollama
 
-    return ChatOllama(model=config.AGENT_MODEL, base_url=config.OLLAMA_BASE_URL,
-                      temperature=0, num_predict=300)
+    return chat_ollama(config.AGENT_MODEL, temperature=0, num_predict=300)
 
 
 # ---------- memory ----------
@@ -54,13 +53,14 @@ def recall_memory(chat_id: str, user_id: str = "local") -> dict:
 @tool
 def save_turn(chat_id: str, user_id: str, question: str, answer: str, step: int,
               closed: bool, meta: str = "", sources: list[dict] | None = None,
-              followups: list[dict] | None = None) -> dict:
-    """Persist one exchange (question already PII-redacted) and the session's step count."""
+              followups: list[dict] | None = None, trace_id: str | None = None) -> dict:
+    """Persist one exchange (question already PII-redacted) and the session's step
+    count. trace_id links the saved answer to its trace (observability)."""
     from ..history import add_exchange
     from .memory import save_session
 
     add_exchange(chat_id, question, answer, meta, sources,
-                 extra={"followups": followups or [], "step": step})
+                 extra={"followups": followups or [], "step": step, "trace_id": trace_id})
     save_session(chat_id, user_id, steps=step, closed=closed)
     return {"saved": True, "step": step, "closed": closed}
 

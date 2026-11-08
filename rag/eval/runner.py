@@ -13,6 +13,7 @@ from .. import config
 from ..chain import build_answer_chain, get_llm
 from ..store import get_retriever
 from . import metrics as M
+from .latency import fmt_stats, latency_stats, timer
 from .dataset import EvalItem, load_dataset
 from .truthfulness import THRESHOLD, get_scorer
 
@@ -56,6 +57,32 @@ def judge(item: EvalItem, answer: str, contexts: list[str], nli) -> dict:
     return out
 
 
+def _generate_timed(answer_chain, docs, question: str) -> tuple[str, dict]:
+    """Stream the answer, timing time-to-first-token and total generation."""
+    t0 = time.perf_counter()
+    first, parts = None, []
+    for chunk in answer_chain.stream({"context": docs, "question": question}):
+        if first is None and chunk:
+            first = time.perf_counter()
+        parts.append(chunk)
+    end = time.perf_counter()
+    answer = "".join(parts)
+    tokens = _count_tokens(answer)
+    total_s = end - t0  # whole generation: short answers arrive in one chunk, so
+    #                     first-to-last-token time is ~0 and would inflate the rate
+    return answer, {"ttft_ms": round(((first or end) - t0) * 1000, 1),
+                    "generate_ms": round(total_s * 1000, 1), "output_tokens": tokens,
+                    "tokens_per_s": round(tokens / total_s, 1) if total_s > 0 and tokens else None}
+
+
+def _count_tokens(text: str) -> int:
+    if config.LLM_PROVIDER == "huggingface":
+        from ..chain import _load_hf_model
+
+        return len(_load_hf_model(config.HF_LLM_MODEL)[0].encode(text, add_special_tokens=False))
+    return len(text.split())
+
+
 def _mean(values) -> float | None:
     values = [v for v in values if v is not None]
     return statistics.fmean(values) if values else None
@@ -81,16 +108,22 @@ def run_eval(
     t0 = time.time()
     for qi, item in enumerate(items, 1):
         question = item.question
+        lat: dict = {}
         if item.history:
             from ..followup import standalone_question
 
-            question = standalone_question(item.question, item.history)
-        docs = retriever.invoke(question)
+            with timer(lat, "rewrite_ms"):
+                question = standalone_question(item.question, item.history)
+        with timer(lat, "retrieve_ms"):
+            docs = retriever.invoke(question)
         contexts = [d.page_content for d in docs]
         samples = []
         for _ in range(n):
-            answer = answer_chain.invoke({"context": docs, "question": question})
-            samples.append(judge(item, answer, contexts, nli))
+            answer, gen = _generate_timed(answer_chain, docs, question)
+            sample = judge(item, answer, contexts, nli)
+            sample.update(gen, end_to_end_ms=round(lat.get("rewrite_ms", 0) + lat["retrieve_ms"]
+                                                     + gen["generate_ms"], 1))
+            samples.append(sample)
         c = sum(s["correct"] for s in samples)
 
         row = {
@@ -102,6 +135,7 @@ def run_eval(
             "accuracy": c / n,
             "standalone_question": question if question != item.question else None,
             "sources": [d.metadata.get("source") for d in docs],
+            "latency": lat,
             "samples": samples,
         }
         if item.answerable and item.evidence:
@@ -184,6 +218,14 @@ def summarize(rows: list[dict], ks: tuple[int, ...]) -> dict:
     fn = sum(not x["refused"] for r in unans for x in r["samples"])
     fp = sum(x["refused"] for x in ans_samples)
     s["abstention"] = M.classification_prf(tp, fp, fn)
+    s["latency"] = {
+        "end_to_end_ms": latency_stats(x.get("end_to_end_ms") for x in all_samples),
+        "ttft_ms": latency_stats(x.get("ttft_ms") for x in all_samples),
+        "generate_ms": latency_stats(x.get("generate_ms") for x in all_samples),
+        "retrieve_ms": latency_stats(r["latency"].get("retrieve_ms") for r in rows if r.get("latency")),
+        "rewrite_ms": latency_stats(r["latency"].get("rewrite_ms") for r in rows if r.get("latency")),
+        "tokens_per_s": latency_stats(x.get("tokens_per_s") for x in all_samples),
+    }
     return s
 
 
@@ -217,4 +259,13 @@ def print_report(s: dict) -> None:
             print(f"\n{section.capitalize()}")
             for k, v in s[section].items():
                 print(f"  {k:<23} {fmt(v)}")
+    if lat := s.get("latency"):
+        print("\nLatency")
+        for k, v in lat.items():
+            if not v:
+                continue
+            if k == "tokens_per_s":
+                print(f"  {k:<23} p50 {v['p50']} tok/s, mean {v['mean']} tok/s")
+            else:
+                print(f"  {k:<23} {fmt_stats(v)}")
     print(f"\nSaved to {s['results_dir']}\n")

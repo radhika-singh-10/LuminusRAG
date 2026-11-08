@@ -57,11 +57,10 @@ NEAR_DUPLICATE = 0.86
 
 @lru_cache(maxsize=1)
 def _generator():
-    from langchain_ollama import ChatOllama
+    from ..prompt_cache import chat_ollama
 
-    llm = ChatOllama(model=config.AGENT_MODEL, base_url=config.OLLAMA_BASE_URL,
-                     temperature=0.3, num_predict=200)
-    return FOLLOWUP_PROMPT | llm | StrOutputParser()
+    llm = chat_ollama(config.AGENT_MODEL, temperature=0.3, num_predict=200)
+    return (FOLLOWUP_PROMPT | llm | StrOutputParser()).with_config(run_name="followup_generator")
 
 
 def _clean(line: str) -> str | None:

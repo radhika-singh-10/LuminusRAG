@@ -24,9 +24,9 @@ import httpx
 import numpy as np
 from bs4 import BeautifulSoup
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from . import config
+from .chunking import chunk_text
 from .safety import looks_like_injection, redact_pii, strip_redactions
 from .store import get_embeddings, get_vectorstore
 
@@ -174,14 +174,12 @@ def web_documents(query: str, k: int | None = None) -> tuple[list[Document], dic
     if not results:
         return [], stats
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=config.CHUNK_SIZE, chunk_overlap=config.CHUNK_OVERLAP
-    )
     candidates: list[Document] = []
     for i, r in enumerate(results):
         meta = {"source": r["href"], "title": r.get("title", "")[:200], "origin": "web"}
         text = fetch_text(r["href"]) if i < config.WEB_FETCH_PAGES else None
-        pieces = splitter.split_text(text)[:MAX_CHUNKS_PER_PAGE] if text else []
+        # Same structure-aware, non-overlapping chunking as documents.
+        pieces = [c.text for c in chunk_text(text)][:MAX_CHUNKS_PER_PAGE] if text else []
         if text:
             stats["pages_fetched"] += 1
         elif r.get("body"):  # fall back to the search snippet

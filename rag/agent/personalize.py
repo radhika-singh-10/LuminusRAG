@@ -157,14 +157,14 @@ class PersonalizedRetriever(BaseRetriever):
         from ..versioning import is_active
 
         if not (config.PERSONALIZE and self.interests):
-            return get_retriever(self.k).invoke(query)
+            return get_retriever(self.k).invoke(query, {"callbacks": run_manager.get_child()})
 
         emb = get_embeddings()
         store = get_vectorstore()
         q = np.asarray(emb.embed_query(query))
         p = profile_vector(self.interests)
         if p is None:
-            return get_retriever(self.k).invoke(query)
+            return get_retriever(self.k).invoke(query, {"callbacks": run_manager.get_child()})
 
         # 1. ANN candidates: the question, and the question nudged toward the profile.
         fetch = self.k * 3

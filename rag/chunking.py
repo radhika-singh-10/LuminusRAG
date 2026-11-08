@@ -10,6 +10,11 @@ text, hash, and id (and its embedding is reused):
 - Inside a section, paragraphs (blank-line separated) are packed into chunks of
   up to CHUNK_SIZE characters. Fenced code blocks and tables are kept whole.
 - A paragraph longer than CHUNK_SIZE is split at sentence boundaries.
+- Fenced code blocks longer than CHUNK_SIZE are split by function / class
+  (rag/code_chunking.py), each piece kept as its own fenced block.
+- Source code files (.py, .js, .ts, .java, .go, .rs, ...) are chunked by
+  syntax: imports together, then one chunk per function / class / method
+  (chunk_code below).
 - PDFs: each page is a section ("page N"); its paragraphs are packed the same way.
 - No overlap: overlapping text from a neighbour would make a chunk's hash
   change when the neighbour is edited. The heading path supplies context.
@@ -19,7 +24,7 @@ content hash both include it.
 """
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import config
 
@@ -34,6 +39,7 @@ class Chunk:
     heading: str        # "A > B > C", "" if none
     position: int       # order within the document version
     page: int | None = None
+    meta: dict = field(default_factory=dict)  # code: kind, symbol, language
 
     @property
     def content_hash(self) -> str:
@@ -65,9 +71,30 @@ def _blocks(lines: list[str]) -> list[str]:
     return [b.strip("\n") for b in blocks if b.strip()]
 
 
+def _split_fence(block: str, size: int) -> list[str]:
+    """A long fenced code block in a known language -> one fenced block per
+    function / class (no overlap). Other fences stay whole."""
+    from .code_chunking import FENCE_LANGUAGES, code_units
+
+    lines = block.splitlines()
+    m = re.match(r"^\s*(```|~~~)\s*([\w+#-]*)", lines[0])
+    lang = FENCE_LANGUAGES.get((m.group(2) if m else "").lower())
+    if not lang or len(lines) < 3 or not _FENCE.match(lines[-1]):
+        return [block]
+    fence, body = lines[0], "\n".join(lines[1:-1])
+    units = code_units(body, lang, size)
+    if len(units) <= 1:
+        return [block]
+    return [f"{fence}\n{text}\n{lines[-1].strip()}" for _, text in units]
+
+
 def _split_long(block: str, size: int) -> list[str]:
-    if len(block) <= size or block.lstrip().startswith(("```", "~~~", "|")):
-        return [block]  # code and tables stay whole even when long
+    if len(block) <= size:
+        return [block]
+    if block.lstrip().startswith(("```", "~~~")):
+        return _split_fence(block, size)
+    if block.lstrip().startswith("|"):
+        return [block]  # tables stay whole even when long
     parts, cur = [], ""
     for sentence in _SENTENCE_END.split(block):
         if cur and len(cur) + len(sentence) + 1 > size:
@@ -81,15 +108,23 @@ def _split_long(block: str, size: int) -> list[str]:
 
 
 def _pack(blocks: list[str], size: int) -> list[str]:
-    """Greedily pack whole blocks into chunks of up to `size` characters."""
-    pieces = [p for b in blocks for p in _split_long(b, size)]
+    """Greedily pack whole blocks into chunks of up to `size` characters.
+    Pieces of a code block split by function / class each stay their own chunk."""
     chunks, cur = [], ""
-    for p in pieces:
-        if cur and len(cur) + len(p) + 2 > size:
-            chunks.append(cur)
-            cur = p
-        else:
-            cur = f"{cur}\n\n{p}" if cur else p
+    for b in blocks:
+        parts = _split_long(b, size)
+        solo = len(parts) > 1 and b.lstrip().startswith(("```", "~~~"))
+        for p in parts:
+            if solo:
+                if cur:
+                    chunks.append(cur)
+                    cur = ""
+                chunks.append(p)
+            elif cur and len(cur) + len(p) + 2 > size:
+                chunks.append(cur)
+                cur = p
+            else:
+                cur = f"{cur}\n\n{p}" if cur else p
     if cur:
         chunks.append(cur)
     return chunks
@@ -128,4 +163,21 @@ def chunk_text(text: str, page: int | None = None, start: int = 0,
         for body in _pack(_blocks(lines), size):
             stored = f"{heading}\n\n{body}" if heading else body
             out.append(Chunk(text=stored, heading=heading, position=start + len(out), page=page))
+    return out
+
+
+def chunk_code(text: str, language: str, file_label: str = "", start: int = 0,
+               size: int | None = None) -> list[Chunk]:
+    """Source file -> chunks by syntax: imports, functions, classes, methods.
+    The heading path ("store.py > class VectorStore > def search") is stored
+    with the code so the embedding sees which symbol it is. Line numbers are
+    left out of the stored text so an edit above a function doesn't change
+    that function's hash."""
+    from .code_chunking import code_units, unit_heading
+
+    out: list[Chunk] = []
+    for u, code in code_units(text, language, size or config.CHUNK_SIZE):
+        heading = unit_heading(file_label, u)
+        out.append(Chunk(text=f"{heading}\n\n{code}", heading=heading, position=start + len(out),
+                         meta={"kind": u.kind, "symbol": u.name, "language": language}))
     return out

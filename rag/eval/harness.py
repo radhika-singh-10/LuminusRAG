@@ -38,6 +38,9 @@ COLUMNS = [
     ("abst_F1", lambda s: s["abstention"]["f1"]),
     ("judge", lambda s: (s.get("llm_judge") or {}).get("judge_accuracy")),
     ("kappa", lambda s: (s.get("llm_judge") or {}).get("cohen_kappa")),
+    ("e2e_p50", lambda s: (s.get("latency") or {}).get("end_to_end_ms", {}).get("p50")),
+    ("e2e_p95", lambda s: (s.get("latency") or {}).get("end_to_end_ms", {}).get("p95")),
+    ("ttft_p50", lambda s: (s.get("latency") or {}).get("ttft_ms", {}).get("p50")),
     ("secs", lambda s: s["config"]["seconds"]),
 ]
 
@@ -105,7 +108,7 @@ def print_comparison(results: list[dict]) -> None:
         for _, get in COLUMNS:
             try:
                 v = get(r)
-            except (KeyError, TypeError):
+            except (KeyError, TypeError, AttributeError):
                 v = None
             cells.append("     n/a" if v is None else f"{v:8.3f}" if isinstance(v, float) else f"{v:>8}")
         print(f"{r['variant']:<{name_w}} " + " ".join(cells))

@@ -64,6 +64,7 @@ class AgentState(TypedDict, total=False):
     followups: list[dict]
     metrics: dict
     trace: Annotated[list[dict], operator.add]
+    trace_id: str
 
 
 def _label(meta: dict) -> str:
@@ -112,10 +113,17 @@ class AgentHarness:
 
     def events(self, chat_id: str, question: str, from_followup: bool = False):
         """Yield {"type": "status"|"token"|"final", ...} for one user turn."""
+        from ..observability import trace_config
+
+        # One trace per turn: this run is the root, every node / tool / retriever /
+        # LLM call below it is a child span (LangChain callbacks).
+        cfg = trace_config("agent_turn", metadata={"chat_id": chat_id, "user_id": self.user_id,
+                                                   "from_followup": from_followup},
+                           tags=["agent"])
         state = {"chat_id": chat_id, "user_id": self.user_id, "raw_question": question,
-                 "from_followup": from_followup, "trace": []}
+                 "from_followup": from_followup, "trace": [], "trace_id": str(cfg["run_id"])}
         final = None
-        for mode, chunk in self.graph.stream(state, stream_mode=["custom", "values"]):
+        for mode, chunk in self.graph.stream(state, cfg, stream_mode=["custom", "values"]):
             if mode == "custom":
                 yield chunk
             else:
@@ -296,7 +304,8 @@ class AgentHarness:
         _, tr = _call("memory", T.save_turn,
                       {"chat_id": s["chat_id"], "user_id": s["user_id"], "question": r["question"],
                        "answer": r["answer"], "step": s["step"], "closed": closed,
-                       "sources": sources, "followups": s.get("followups") or []})
+                       "sources": sources, "followups": s.get("followups") or [],
+                       "trace_id": s.get("trace_id")})
         trace = [tr]
         if s.get("summary") is not None:
             save_session(s["chat_id"], s["user_id"], summary=s["summary"],
@@ -329,6 +338,7 @@ class AgentHarness:
             "metrics": s.get("metrics") or {},
             "trace": s.get("trace") or [],
             "from_followup": s.get("from_followup", False),
+            "trace_id": s.get("trace_id"),
         })
         return r
 

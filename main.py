@@ -1,4 +1,4 @@
-"""LuminusRAG CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security | graph | gc | versions | chunks | agent | eval-agent | eval-ocr | ocr"""
+"""LuminusRAG CLI: python main.py ingest [--rebuild] | ask "question" | chat | add FILES | eval | bench | eval-intent | chats | summarize | eval-guard | eval-security | graph | gc | versions | chunks | agent | eval-agent | eval-ocr | ocr | watch | eval-chunking | traces | cache"""
 import argparse
 import sys
 from pathlib import Path
@@ -41,6 +41,8 @@ def print_result(result: dict, answer_shown: bool = False) -> None:
         print(f"[web search failed: {result['web_error']}]")
     if result.get("stored"):
         print(f"[saved {result['stored']} web passages to the knowledge base]")
+    if result.get("trace_id"):
+        print(f"[trace {result['trace_id'][:8]}: python main.py traces {result['trace_id'][:8]}]")
     if not answer_shown:
         print(f"\n{result['answer']}\n")
     if intent and intent.error and intent.category in ("error", "guard_error"):
@@ -56,10 +58,86 @@ def print_result(result: dict, answer_shown: bool = False) -> None:
     print()
 
 
+def show_traces(args) -> int:
+    from rag import observability as obs
+
+    if args.purge:
+        print(f"Removed {obs.purge()} traces older than {config.TRACE_RETENTION_DAYS} days.")
+        return 0
+    if args.stats:
+        print(f"{'span':<34}{'type':<11}{'count':>6}{'p50 ms':>9}{'p95 ms':>9}{'errors':>8}{'tokens':>9}")
+        for r in obs.span_stats():
+            print(f"{r['name'][:33]:<34}{r['type']:<11}{r['count']:>6}{r['p50_ms'] or 0:>9.0f}"
+                  f"{r['p95_ms'] or 0:>9.0f}{r['error_rate']:>8.2f}{r['tokens'] or '':>9}")
+        return 0
+    if args.trace_id:
+        t = obs.get_trace(args.trace_id)
+        if not t:
+            print(f"No trace {args.trace_id}")
+            return 1
+        print(f"{t['name']}  {t['trace_id']}  {t['latency_ms']} ms  {len(t['spans'])} spans  "
+              f"{t['llm_calls']} LLM calls  {t['tokens'] or 0} tokens  status {t['status']}")
+        print(f"question: {t['question']}\n")
+        for sp in t["spans"]:
+            llm = (f"  {sp['model']} in={sp['tokens_in']} out={sp['tokens_out']}"
+                   if sp["run_type"] in ("llm", "chat_model") else "")
+            err = f"  ERROR {sp['error'][:80]}" if sp["error"] else ""
+            print(f"{'  ' * sp['depth']}{sp['name']} [{sp['run_type']}] {sp['latency_ms']} ms{llm}{err}")
+        return 0
+    rows = obs.list_traces(args.limit, args.chat)
+    if not rows:
+        print("No traces yet.")
+    for r in rows:
+        print(f"{(r['start'] or '')[:19].replace('T', ' ')}  {r['trace_id'][:8]}  {r['name']:<17} "
+              f"{r['latency_ms'] or 0:>6} ms  {r['spans']:>3} spans  {r['llm_calls']:>2} LLM  "
+              f"{r['status']:<5}  {(r['question'] or '')[:60]}")
+    return 0
+
+
+def watch_loop(quiet: float | None) -> int:
+    """Re-index changed files once data/ has been quiet for DEBOUNCE_SECONDS."""
+    from rag.versioning import wait_for_gc
+    from rag.watcher import Watcher
+
+    def on_event(event: str, info: dict) -> None:
+        name = Path(info.get("path") or info.get("source") or "").name
+        if event == "change":
+            print(f"  {info['kind']:<8} {name}  ({info['pending']} pending; "
+                  f"sync in {info['sync_in']:.0f}s unless more changes)")
+        elif event == "sync_start":
+            print(f"Quiet for {w.debouncer.quiet:g}s -> syncing {len(info['files'])} file(s)")
+        elif event == "diff":
+            print(f"  diff {name}: {info['total']} chunks, {info['unchanged']} unchanged, "
+                  f"{info['added']} new/changed, {info['removed']} removed")
+        elif event == "activated":
+            print(f"  {name}: version {info['version']} live")
+        elif event == "removed":
+            print(f"  {name}: deleted, retired")
+        elif event == "sync_done":
+            s = info["stats"]
+            print(f"Synced in {info['seconds']}s: {s['chunks_written']} chunks embedded, "
+                  f"{s['chunks_reused']} reused\n")
+        elif event == "sync_error":
+            print(f"Sync failed: {info['error']}")
+
+    w = Watcher(quiet=quiet, on_event=on_event)
+    print(f"Watching {w.data_dir} (debounce {w.debouncer.quiet:g}s, max wait "
+          f"{w.debouncer.max_wait:g}s). Ctrl+C to stop.")
+    try:
+        w.run()
+    except KeyboardInterrupt:
+        pass
+    wait_for_gc()
+    return 0
+
+
 def agent_loop(chat_id: str | None, user_id: str, show_trace: bool) -> int:
     """Interactive multi-step session: type a question, or 1-3 to take a suggestion."""
     from rag.agent.harness import build_agent
     from rag.history import new_chat_id
+    from rag.prompt_cache import warm_in_background
+
+    warm_in_background()  # prefill the system prompts while the user types
 
     agent = build_agent(user_id=user_id)
     chat_id = chat_id or new_chat_id()
@@ -115,7 +193,7 @@ def main() -> int:
 
     ing = sub.add_parser("ingest", help=f"Sync the index with files in {config.DATA_DIR}")
     ing.add_argument("--rebuild", action="store_true", help="Drop and rebuild the index")
-    add = sub.add_parser("add", help="Add .pdf/.txt/.md files to the knowledge base")
+    add = sub.add_parser("add", help="Add .pdf/.txt/.md or source-code files to the knowledge base")
     add.add_argument("files", nargs="+", type=Path)
     sub.add_parser("docs", help="List indexed documents")
     ask = sub.add_parser("ask", help="Ask a single question")
@@ -158,6 +236,18 @@ def main() -> int:
     ea.add_argument("--compare", action="store_true", help="Also run sessions with personalization off")
     ea.add_argument("--no-sessions", action="store_true", help="Personalized retrieval only")
     ea.add_argument("--no-retrieval", action="store_true", help="Sessions only")
+    wa = sub.add_parser("watch", help="Watch data/ and re-index changed files after a quiet period")
+    wa.add_argument("--quiet", type=float, default=None,
+                    help=f"Seconds without changes before syncing (default {config.DEBOUNCE_SECONDS:g})")
+    sub.add_parser("eval-chunking", help="Chunking checks (no overlap, exact partition) + code retrieval eval")
+    tr = sub.add_parser("traces", help="Observability: list traces, show one as a span tree, or stats")
+    tr.add_argument("trace_id", nargs="?", help="Trace id (or prefix) to show")
+    tr.add_argument("--stats", action="store_true", help="Latency / errors / tokens by span name")
+    tr.add_argument("--chat", default=None, help="Only traces of this chat id")
+    tr.add_argument("--limit", type=int, default=20)
+    tr.add_argument("--purge", action="store_true", help="Delete traces older than TRACE_RETENTION_DAYS")
+    ca = sub.add_parser("cache", help="Prompt cache: prefill system prompts (warm) or show hit rates")
+    ca.add_argument("action", choices=["warm", "status"])
     sub.add_parser("eval-ocr", help="OCR accuracy (CER/WER) and retrieval on synthetic scanned PDFs")
     oc = sub.add_parser("ocr", help="OCR a PDF and print the text of its scanned pages")
     oc.add_argument("file", type=Path)
@@ -176,6 +266,37 @@ def main() -> int:
 
         ingest(rebuild=args.rebuild)
         wait_for_gc()  # the background GC must finish before this process exits
+        return 0
+
+    if args.cmd == "cache":
+        if args.action == "warm":
+            from rag.prompt_cache import warm
+
+            for name, r in warm().items():
+                print(f"{name:<42} " + (r["error"] if "error" in r else
+                      f"{r['prompt_tokens']} tokens, prompt {r['prompt_ms']} ms, load {r['load_ms']} ms"))
+            return 0
+        from rag import observability as obs
+
+        rows = [r for r in obs.span_stats() if r.get("cache_hit_rate") is not None]
+        if not rows:
+            print("No Ollama calls traced yet.")
+        for r in sorted(rows, key=lambda r: r["name"]):
+            print(f"{r['name']:<16} {r['count']:>5} calls  cache hit rate {r['cache_hit_rate']:.2f}  "
+                  f"prompt p50 {r['prompt_ms_p50'] or 0:.0f} ms")
+        return 0
+
+    if args.cmd == "traces":
+        return show_traces(args)
+
+    if args.cmd == "watch":
+        return watch_loop(args.quiet)
+
+    if args.cmd == "eval-chunking":
+        from rag.eval.chunk_eval import run_chunk_eval
+
+        out = run_chunk_eval()
+        print(f"\nSaved to {out['path']}  ({out['seconds']}s)")
         return 0
 
     if args.cmd == "eval-ocr":
@@ -362,6 +483,9 @@ def main() -> int:
 
     from rag.history import add_exchange, new_chat_id, redact_question
 
+    from rag.prompt_cache import warm_in_background
+
+    warm_in_background()  # prefill the judges' system prompts while you type
     chat_id, history = new_chat_id(), []
     print(f"Type a question (or 'exit'). Chat id: {chat_id}")
     while True:

@@ -110,15 +110,12 @@ class Intent:
 
 @lru_cache(maxsize=1)
 def _classifier():
-    from langchain_ollama import ChatOllama
+    from .prompt_cache import chat_ollama
 
-    llm = ChatOllama(
-        model=config.INTENT_MODEL,
-        base_url=config.OLLAMA_BASE_URL,
-        temperature=0,
+    llm = chat_ollama(config.INTENT_MODEL, temperature=0,
         num_predict=64,
     )
-    return INTENT_PROMPT | llm.with_structured_output(IntentLabel)
+    return (INTENT_PROMPT | llm.with_structured_output(IntentLabel)).with_config(run_name="intent_classifier")
 
 
 def classify_intent(question: str, recent: list[str] | None = None) -> Intent:

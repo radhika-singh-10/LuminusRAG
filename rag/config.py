@@ -18,8 +18,7 @@ HF_LLM_MODEL = os.getenv("HF_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 HF_MAX_NEW_TOKENS = int(os.getenv("HF_MAX_NEW_TOKENS", "512"))
 EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))  # max chars; chunks never overlap
 TOP_K = int(os.getenv("TOP_K", "8"))  # structure-aware chunks are ~400 chars; 8 ≈ the old 4 x 1000
 SEARCH_TYPE = os.getenv("SEARCH_TYPE", "similarity")  # "similarity" or "mmr"
 
@@ -96,3 +95,25 @@ OCR_DPI = int(os.getenv("OCR_DPI", "200"))
 OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "30"))  # fewer non-space chars -> OCR the page
 OCR_MIN_CONFIDENCE = float(os.getenv("OCR_MIN_CONFIDENCE", "0.5"))  # drop less certain lines
 OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "300"))  # per file
+
+# Code chunking: one chunk per function / class / method; imports together
+CODE_MAX_CHARS = int(os.getenv("CODE_MAX_CHARS", "4000"))  # longer functions split at statements
+
+# Debounced re-indexing: wait until files have been quiet this long, then
+# diff chunks and build new versions (rag/watcher.py)
+DEBOUNCE_SECONDS = float(os.getenv("DEBOUNCE_SECONDS", "10"))
+WATCH_POLL_SECONDS = float(os.getenv("WATCH_POLL_SECONDS", "1"))
+DEBOUNCE_MAX_SECONDS = float(os.getenv("DEBOUNCE_MAX_SECONDS", "60"))  # sync even if edits never stop
+
+# Observability (rag/observability.py): LangChain tracers
+TRACE_LOCAL = os.getenv("TRACE_LOCAL", "true").lower() == "true"  # SQLite span store, local only
+TRACE_DB_URL = os.getenv("TRACE_DB_URL", f"sqlite:///{ROOT / 'traces' / 'traces.sqlite'}")
+TRACE_MAX_CHARS = int(os.getenv("TRACE_MAX_CHARS", "2000"))  # per stored input / output
+TRACE_RETENTION_DAYS = int(os.getenv("TRACE_RETENTION_DAYS", "14"))
+TRACE_LANGSMITH = os.getenv("TRACE_LANGSMITH", "false").lower() == "true"  # opt-in, PII-redacted
+LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "luminusrag")
+
+# Prompt caching (rag/prompt_cache.py): keep Ollama models + their KV prompt
+# cache loaded, and prefill the fixed system prompts at startup
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+PROMPT_CACHE_WARMUP = os.getenv("PROMPT_CACHE_WARMUP", "true").lower() == "true"

@@ -28,6 +28,7 @@ from pathlib import Path
 from .. import config
 from ..safety import detect_pii
 from . import metrics as M
+from .latency import fmt_stats, latency_stats
 
 PLANTED = {
     # test_one.md (fictional PII and secrets)
@@ -102,7 +103,9 @@ def run_security_eval(n: int = 3, ks: tuple[int, ...] = (1, 3), temperature: flo
         for qi, item in enumerate(items, 1):
             samples = []
             for _ in range(n):
+                t1 = time.perf_counter()
                 r = chain.invoke(item["question"])
+                ms = round((time.perf_counter() - t1) * 1000, 1)
                 answer = r["answer"]
                 blocked = r["origin"] is None
                 guard = r.get("guard")
@@ -115,7 +118,7 @@ def run_security_eval(n: int = 3, ks: tuple[int, ...] = (1, 3), temperature: flo
                 s = {"answer": answer, "blocked": blocked, "blocked_by": blocked_by,
                      "rule": guard.rule_id if guard is not None and not guard.safe else None,
                      "leaks": leaks, "refused": refused, "origin": r["origin"],
-                     "output_actions": r.get("output_actions", [])}
+                     "output_actions": r.get("output_actions", []), "latency_ms": ms}
                 if item["safe"] and not item.get("in_scope", True):
                     # Non-AI question: the intent gate is expected to decline it.
                     s["helpful"] = None
@@ -167,6 +170,12 @@ def run_security_eval(n: int = 3, ks: tuple[int, ...] = (1, 3), temperature: flo
                    "sandbox_chunks": ingest_stats.get("total_chunks"),
                    "seconds": round(time.time() - t0, 1), "n_items": len(items)},
         "groups": {},
+        "latency": {
+            "all_ms": latency_stats(x["latency_ms"] for r in rows for x in r["samples"]),
+            "blocked_ms": latency_stats(x["latency_ms"] for r in rows for x in r["samples"] if x["blocked"]),
+            "answered_ms": latency_stats(x["latency_ms"] for r in rows for x in r["samples"]
+                                         if not x["blocked"]),
+        },
     }
     groups = {("all", "all"): rows}
     for uc in ("pii", "prompt_injection"):
@@ -238,6 +247,10 @@ def print_security_report(s: dict) -> None:
     cfg = s["config"]
     print(f"\nSecurity eval: {cfg['n_items']} cases x {cfg['n_samples']} samples "
           f"(T={cfg['temperature']}, guard={cfg['guard_model']}, llm={cfg['llm']}) in {cfg['seconds']}s")
+    if lat := s.get("latency"):
+        print("Latency per question (end to end)")
+        for k, v in lat.items():
+            print(f"  {k:<12} {fmt_stats(v)}")
     keys = ["accuracy", *[k for k in next(iter(s["groups"].values())) if k.startswith("pass")],
             "leak_rate", "attack_refusal_rate", "attack_blocked_by_guard", "attack_blocked_by_intent",
             "benign_over_block_rate", "benign_helpful_rate", "block_precision", "block_recall", "block_f1"]

@@ -124,7 +124,11 @@ LuminusRAG/
 │   ├── store.py         # Chroma vector store, embeddings, retriever
 │   ├── ingest.py        # load -> OCR -> sanitize -> chunk -> versioned, content-addressed upsert
 │   ├── ocr.py           # OCR for scanned PDF pages (RapidOCR + pypdfium2, local)
-│   ├── chunking.py      # stable structure-aware chunking (headings, sections, paragraphs)
+│   ├── observability.py # LangChain tracers: local SQLite span store, opt-in LangSmith (redacted)
+│   ├── chunking.py      # stable structure-aware chunking (headings, sections, paragraphs), no overlap
+│   ├── code_chunking.py # code chunked by imports / function / class / method (ast + brace scanner)
+│   ├── watcher.py       # debounced re-indexing: quiet period -> chunk diff -> new version
+│   ├── prompt_cache.py  # Ollama keep-alive factory + system-prompt cache warm-up
 │   ├── versioning.py    # version registry, active chunk set, async garbage collector
 │   ├── intent.py        # Ollama intent gate (AI questions only)
 │   ├── web.py           # web fallback: search, fetch, clean, rank, store
@@ -151,6 +155,8 @@ LuminusRAG/
 │       ├── security_eval.py # full-pipeline PII + prompt-injection eval
 │       ├── agent_eval.py # personalization + 10-step follow-up sessions
 │       ├── ocr_eval.py  # OCR CER/WER + retrieval on synthetic scanned PDFs
+│       ├── chunk_eval.py # code retrieval by chunking strategy, edit locality, debounced sync
+│       ├── latency.py   # latency stats (p50/p90/p95/p99) shared by every eval
 │       ├── runner.py    # single eval run -> report
 │       └── harness.py   # multi-variant experiments + comparison table
 ├── eval/
@@ -164,7 +170,8 @@ LuminusRAG/
 │   ├── prompt_injection.json  # injection rules: patterns, examples, scope
 │   └── pii.json               # PII rules and detectors
 ├── security-testing/    # poisoned test documents + original test plans
-├── data/                # put your .pdf / .txt / .md files here
+├── tests/               # chunking, debounce and prompt-cache tests (python tests/test_*.py)
+├── data/                # put your .pdf / .txt / .md / source-code files here
 ├── requirements.txt
 └── .env.example
 ```
@@ -192,6 +199,7 @@ streamlit run app.py                           # web UI at http://localhost:8501
 python main.py add report.pdf notes.md         # copy files into data/uploads and index them
 python main.py docs                            # list indexed documents
 python main.py ingest                          # sync index with data/ (incremental)
+python main.py watch                           # re-index edits after 10 s without changes (debounced)
 python main.py ingest --rebuild                # drop and rebuild the index
 python main.py versions                        # document versions (active / building / retired)
 python main.py gc                              # garbage-collect retired versions now
@@ -201,6 +209,13 @@ python main.py agent                           # multi-step agent: follow-up sug
 python main.py agent --trace                   # ...with the per-layer tool trace
 python main.py eval-agent --compare            # personalization + session eval (vs personalization off)
 python main.py ocr scan.pdf                    # OCR the scanned pages of a PDF and print the text
+python main.py traces                          # recent traces (one per question)
+python main.py traces 5edb8933                 # one trace as a span tree (timing, model, tokens)
+python main.py traces --stats                  # p50 / p95 latency, errors, tokens by span
+python main.py cache warm                      # prefill the system prompts into Ollama's prompt cache
+python main.py cache status                    # prompt-cache hit rate per model (from traces)
+python main.py eval-chunking                   # chunking strategies, edit locality, debounced sync
+python tests/test_chunking.py                  # chunking + debounce tests (also: python -m pytest tests)
 python main.py eval-ocr                        # OCR accuracy + retrieval on synthetic scans
 python main.py eval -n 5 -k 1,3,5              # evaluate on eval/dataset.jsonl
 python main.py bench                           # run + compare variants in eval/experiments.json
@@ -222,6 +237,8 @@ The web UI has four tabs:
 - **Upload & process**: drop PDFs/TXT/MD; each file is processed automatically
   with live steps (save → extract → split → embed + store) and a per-file
   report (pages, characters, chunks, time).
+- **Traces**: one trace per question as a LangChain span tree with latency,
+  tokens, errors and redacted inputs/outputs (see Observability).
 - **Ask**: chat with your documents through the agent harness; every answer
   shows its sources, up to 3 follow-up buttons, the step counter (10 max) and
   an agent trace. The sidebar shows the interests learned from the conversation.
@@ -232,6 +249,92 @@ The web UI has four tabs:
 Ingestion is incremental and versioned: unchanged files are skipped, an edited
 file re-embeds only the chunks that changed, and deleted files are retired and
 cleaned up in the background (see Versioned ingestion).
+
+## Observability and traceability
+
+Tracing uses LangChain's callback and tracer system, so it needs no
+instrumentation beyond naming the chains. Every question becomes **one trace**,
+a tree of LangChain runs:
+
+```
+agent_turn [chain] 8661 ms
+  safety > safety_check [tool]
+    policy_judge:prompt_injection:query > ChatOllama [llm] llama3.2:3b in=968 out=66
+    policy_judge:pii:query > ChatOllama [llm]
+  context > build_context, contextualize > followup_rewriter
+  intent > intent_check > intent_classifier > ChatOllama [llm]
+  retrieve > PersonalizedRetriever > HybridRetriever > ActiveVectorRetriever [retriever]
+  answer > answer_chain > ChatHuggingFace [llm] Qwen/Qwen2.5-1.5B-Instruct
+  personalize, followups > followup_generator, summarize, evaluate, save
+```
+
+**Where traces go:**
+- **Local (default, `TRACE_LOCAL=true`):** a LangChain `BaseTracer` writes each finished
+  trace to SQLite (`traces/traces.sqlite`). Each run is stored as a span with its
+  parent, type, latency, status, error, model, token counts, and inputs and outputs.
+  Nothing leaves the machine.
+- **LangSmith (opt-in):** set `TRACE_LANGSMITH=true` and `LANGSMITH_API_KEY`. This
+  uses LangChain's `LangChainTracer` with a LangSmith client whose `hide_inputs` and
+  `hide_outputs` hooks redact PII before upload. The raw question appears in the
+  safety-check span, so this matters. Don't use `LANGSMITH_TRACING=true` instead:
+  that turns on LangChain's automatic tracer, which uploads unredacted.
+
+**What's recorded:**
+- **Redaction and limits:** stored inputs and outputs are PII-redacted with the
+  same detectors as `policies/pii.json` and truncated to `TRACE_MAX_CHARS`.
+  Traces older than `TRACE_RETENTION_DAYS` are removed by `traces --purge`.
+- **Traceability:** the trace id is saved with each answer in the chat history
+  and shown under the answer, so an answer can be traced back to the documents,
+  model calls, prompts and decisions behind it. The non-agent path (`ask`,
+  `chat`, evals) is traced the same way, as a `guarded_pipeline` root.
+- **Readable names:** every chain is named for its role (`policy_judge:pii:query`,
+  `intent_classifier`, `answer_chain`, `followup_generator`, `graph_extractor`,
+  `chat_summarizer`, `llm_judge`), so traces don't fill up with `RunnableSequence`.
+
+**Viewing:**
+- The **🔭 Traces** tab shows trace count, p50/p95 latency, errors and LLM tokens,
+  with a per-trace span tree and redacted inputs and outputs for any span.
+- `python main.py traces [ID] [--stats]` shows the same in the terminal.
+
+## Prompt caching
+
+The Ollama models (policy judges, intent classifier, follow-up rewriter and
+generator, summarizer, graph extractor, LLM judge) each send a long fixed
+system prompt of 100–970 tokens, then a short variable part. Ollama keeps the
+KV cache of recent prompts and reuses the longest matching prefix, so a cached
+system prompt costs almost nothing to evaluate. `rag/prompt_cache.py` makes
+that reliable:
+
+- **Fixed system prompts:** they contain no variables, which a test checks;
+  per-request text goes in the user message. The cached prefix then matches
+  byte for byte.
+- **One `chat_ollama()` factory for every call,** with `keep_alive=30m`.
+  Ollama's default is 5 minutes, after which the model and its cache are
+  dropped. A reload costs about 530 ms, plus the cold prompt evaluation.
+- **Warm-up:** at app start, and when `chat` or `agent` starts, all 9 system
+  prompts are prefilled in the background (one output token each), so even
+  the first question hits the cache. `python main.py cache warm` does it on demand.
+- **Visibility:** traces record Ollama's prompt-evaluation time per LLM call
+  and mark it as a cache **hit** or **miss**. The Traces tab and
+  `python main.py cache status` show the hit rate.
+
+Measured on llama3.2:3b:
+
+| System prompt | Tokens | Cold prompt eval | Cached |
+|---|---|---|---|
+| policy judge: prompt injection | 968 | 314 ms (+527 ms model load) | 11 ms |
+| policy judge: PII | 752 | 234 ms | 10 ms |
+| intent classifier | 507 | 153 ms | 10 ms |
+| follow-up rewriter / generator | 250 / 163 | 80 / 74 ms | 9 ms |
+
+Ollama keeps all 9 prefixes cached at once.
+
+**Where caching isn't added:**
+- **Qwen answer model:** its system prompt is only 74 of about 1,040 prompt
+  tokens. Reusing a precomputed KV cache for it saved 3 ms of time-to-first-token
+  (140 → 137 ms), which isn't worth the complexity.
+- **Anthropic provider:** the answer system prompt is below Anthropic's
+  minimum cacheable length, so `cache_control` would do nothing.
 
 ## OCR for scanned PDFs
 
@@ -364,6 +467,42 @@ one paragraph changes only the chunk(s) of its own section. Structure-aware
 chunks average about 400 characters (2.5x smaller than the old fixed-size
 chunks), so `TOP_K` defaults to 8 to keep a similar amount of context; at 4,
 retrieval recall on the main question set fell to 0.82.
+
+**Code is chunked by syntax** (`rag/code_chunking.py`). Source files (`.py`,
+`.js`/`.ts`, `.java`, `.go`, `.rs`, `.c`/`.cpp`, `.cs`, `.kt`, `.swift`,
+`.scala`, `.php`) and long fenced code blocks in Markdown are split into:
+
+- **imports:** all import / include / use statements, the file's libraries,
+  plus the module docstring, in one chunk;
+- **functions:** one chunk each, with their decorators and doc comments;
+- **classes:** one chunk each. A class larger than `CHUNK_SIZE` becomes a
+  header chunk plus one chunk per method;
+- **module code:** other top-level statements, grouped in order.
+
+Python is parsed with `ast`. The brace languages use a scanner that tracks
+brace depth and skips strings and comments. The chunks partition the file:
+every line is in exactly one chunk, so there's no overlap and nothing is lost.
+The heading path (`chain.py > class GuardedPipeline > def events`) is stored
+with the code, but line numbers aren't, so inserting code above a function
+doesn't change that function's hash. Tests in `tests/test_chunking.py` check
+the partition and edit locality.
+
+**No overlap anywhere.** Documents, code and web passages all use the
+structure-aware chunker, and web passages no longer use a 150-character
+overlap. With overlap, a chunk's text includes part of its neighbour, so an
+edit near a boundary changes the hashes of two chunks and both get
+re-embedded.
+
+**Debounced re-indexing** (`rag/watcher.py`, `python main.py watch`, or the
+**Auto-sync** toggle in the sidebar). Editors save repeatedly, so the watcher
+waits until no file in `data/` has changed for `DEBOUNCE_SECONDS` (10 s,
+capped at `DEBOUNCE_MAX_SECONDS`). Then, for the changed files only, it
+rebuilds the chunks and diffs them by hash against the live version
+(unchanged / new / removed). Only after that does it build and activate the
+new version, embedding just the new chunks. In the eval, four saves within
+six seconds led to one sync, 10 s after the last save. It built one version
+per changed file (2 instead of 4) and re-embedded 2 of 19 chunks. A lock
+stops the watcher and UI uploads from indexing at the same time.
 
 **Content-addressed chunks.** A chunk's id is a hash of its document and text.
 When a file changes, unchanged chunks keep their id and embedding and only new
@@ -605,6 +744,7 @@ at `--temperature` when n > 1), judges every answer, and aggregates:
 | Answer | token precision / recall / F1 vs `reference`, citation rate and validity |
 | Truthfulness | faithfulness (claims entailed by retrieved text), contradiction rate, reference entailment, hallucination rate, claim coverage |
 | Abstention | precision / recall / F1 of "I don't know" on unanswerable questions |
+| Latency | per sample: time to first token, generation time, end-to-end (rewrite + retrieval + generation), output tokens/s; per question: retrieval and rewrite time. Each reported as mean / p50 / p90 / p95 / p99 / max |
 
 An answer is correct if it contains every `must_include` phrase (else token
 F1 >= 0.5 or it entails `reference`); for unanswerable questions it must
@@ -613,6 +753,20 @@ refuse. Truthfulness uses a local NLI model
 of the retrieved chunks. Very short answers (e.g. "384") have no checkable
 claims and are excluded from faithfulness (`claim_coverage` reports how many
 were scored).
+
+Every eval reports latency with the same distribution stats (`rag/eval/latency.py`):
+
+| Eval | Latency metrics |
+|---|---|
+| `eval`, `bench` | time to first token, generation, end-to-end, retrieval, rewrite, tokens/s; `bench` adds `e2e_p50`, `e2e_p95`, `ttft_p50` columns |
+| `eval-guard` | per-query guard latency, split by attacks and benign questions |
+| `eval-intent` | per-query classifier latency |
+| `eval-security` | end-to-end latency per question, split by blocked and answered |
+| `eval-agent` | turn latency, time to first token, p50 / p95 per harness layer |
+| `eval-chunking` | chunking time per file, query latency per strategy, sync time, last save → live |
+| `eval-ocr` | seconds per page per scan condition |
+
+Live traffic gets the same view from traces (`traces --stats`: p50 / p95 per span).
 
 `bench` reads `eval/experiments.json`: lower-case keys (`n`, `ks`,
 `temperature`, `top_k`, `limit`, `dataset`) are run settings, UPPER_CASE keys
@@ -627,7 +781,10 @@ Each run writes `per_question.jsonl` and `summary.json` under `eval/results/`.
 | `HF_LLM_MODEL` / `HF_MAX_NEW_TOKENS` | `Qwen/Qwen2.5-1.5B-Instruct` / `512` |
 | `ANTHROPIC_API_KEY` / `LLM_MODEL` | only for `anthropic` / `claude-sonnet-4-5` |
 | `EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` |
-| `CHUNK_SIZE` | `1000` (max characters per chunk; structure-aware, no overlap) |
+| `CHUNK_SIZE` | `1000` (max characters per chunk; by heading / paragraph / function, no overlap) |
+| `CODE_MAX_CHARS` | `4000` (a longer function is split at its top-level statements) |
+| `DEBOUNCE_SECONDS` / `DEBOUNCE_MAX_SECONDS` / `WATCH_POLL_SECONDS` | `10` / `60` / `1` |
+| `OLLAMA_KEEP_ALIVE` / `PROMPT_CACHE_WARMUP` | `30m` / `true` |
 | `GC_GRACE_SECONDS` / `GC_STALE_BUILD_SECONDS` | `5` / `3600` |
 | `TOP_K` / `SEARCH_TYPE` | `8` / `similarity` (or `mmr`) |
 | `RETRIEVAL_MODE` / `GRAPH_K` | `hybrid` (or `vector`, `graph`) / `2` |
@@ -644,6 +801,9 @@ Each run writes `per_question.jsonl` and `summary.json` under `eval/results/`.
 | `NLI_MODEL` | `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` |
 | `OCR_ENABLED` / `OCR_DPI` / `OCR_MIN_CHARS` | `true` / `200` / `30` (pages with fewer text chars are OCR'd) |
 | `OCR_MIN_CONFIDENCE` / `OCR_MAX_PAGES` | `0.5` / `300` per file |
+| `TRACE_LOCAL` / `TRACE_DB_URL` | `true` / `sqlite:///traces/traces.sqlite` |
+| `TRACE_MAX_CHARS` / `TRACE_RETENTION_DAYS` | `2000` / `14` |
+| `TRACE_LANGSMITH` / `LANGSMITH_PROJECT` | `false` / `luminusrag` (needs `LANGSMITH_API_KEY`) |
 | `AGENT_MAX_STEPS` / `AGENT_MAX_FOLLOWUPS` / `AGENT_MODEL` | `10` / `3` / `llama3.2:3b` |
 | `FOLLOWUP_MIN_SCORE` / `FOLLOWUP_MIN_RELEVANCE` | `0.5` / `0.25` (cosine) |
 | `SUMMARY_EVERY` / `AGENT_ONLINE_NLI` | `3` / `false` |

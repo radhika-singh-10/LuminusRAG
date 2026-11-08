@@ -54,11 +54,10 @@ def looks_like_followup(question: str) -> bool:
 
 @lru_cache(maxsize=1)
 def _contextualizer():
-    from langchain_ollama import ChatOllama
+    from .prompt_cache import chat_ollama
 
-    llm = ChatOllama(model=config.GUARD_MODEL, base_url=config.OLLAMA_BASE_URL,
-                     temperature=0, num_predict=80)
-    return CONTEXTUALIZE_PROMPT | llm | StrOutputParser()
+    llm = chat_ollama(config.GUARD_MODEL, temperature=0, num_predict=80)
+    return (CONTEXTUALIZE_PROMPT | llm | StrOutputParser()).with_config(run_name="followup_rewriter")
 
 
 def to_messages(history: list[dict], turns: int | None = None) -> list:

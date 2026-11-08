@@ -138,6 +138,7 @@ def to_ui(message: BaseMessage) -> dict:
         "sources": extra.get("sources", []),
         "followups": extra.get("followups", []),
         "step": extra.get("step"),
+        "trace_id": extra.get("trace_id"),
     }
 
 
@@ -196,7 +197,8 @@ def summarize_messages(messages: list[dict], llm: BaseChatModel) -> str:
         for x in (q, a)
     ]
     summary = (
-        (SUMMARY_PROMPT | llm | StrOutputParser()).invoke({"transcript": transcript(answered)}).strip()
+        (SUMMARY_PROMPT | llm | StrOutputParser()).with_config(run_name="chat_summarizer")
+        .invoke({"transcript": transcript(answered)}).strip()
         if answered else "No questions in this chat were answered."
     )
     if unanswered := unanswered_questions(messages):

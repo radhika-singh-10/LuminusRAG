@@ -44,4 +44,4 @@ class RerankRetriever(BaseRetriever):
 
     def _get_relevant_documents(self, query: str, *,
                                 run_manager: CallbackManagerForRetrieverRun) -> list[Document]:
-        return rerank(query, self.base.invoke(query), self.k)
+        return rerank(query, self.base.invoke(query, {"callbacks": run_manager.get_child()}), self.k)

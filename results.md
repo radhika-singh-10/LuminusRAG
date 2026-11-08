@@ -442,3 +442,121 @@ the email was redacted. The useful text on that page was kept.
 classifier, some upright lines were flipped and read as fragments
 ("en ig i s es"), giving 2–5% CER that varied unpredictably with DPI. With
 the classifier off, CER is 0–0.3% at every DPI tested (150/200/300).
+
+## Code chunking, no overlap, debounced re-indexing (`eval-chunking`)
+
+2026-11-07. 18 questions about this repo's code, over 13 modules. A hit is a
+chunk containing the expected function's `def` line.
+
+| Strategy | chunks | hit@1 | hit@3 | MRR | whole function in top chunk | duplicated text |
+|---|---|---|---|---|---|---|
+| **function-level (ours)** | 168 | **0.500** | **0.778** | **0.685** | **0.500** | 0.000 |
+| fixed 1000 / overlap 150 | 167 | 0.278 | 0.611 | 0.495 | 0.278 | 0.030 |
+| LangChain Python splitter (1000, no overlap) | 180 | 0.333 | 0.667 | 0.534 | 0.278 | 0.000 |
+
+Chunking with syntax and a heading path ("metrics.py > def pass_at_k") puts
+the right function first almost twice as often as the overlapping splitter,
+and the top chunk holds the whole function.
+
+**Edit locality** (40 edits; chunks whose hash changes):
+
+| Strategy | edit one line inside a function | insert a new function above |
+|---|---|---|
+| function-level | 1.00 | 1.20 |
+| fixed 1000 / overlap 150 | 1.02 | 1.40 |
+| LangChain Python splitter | 1.07 | 1.12 |
+
+All three are local on this corpus. LangChain's recursive splitter cuts at
+the same separators even after an insert. Overlap costs duplicated text (3%)
+and a second changed chunk when an edit lands in the overlapping region.
+Function-level chunks also keep their hash when code above them moves,
+because line numbers aren't stored in the chunk text.
+
+**Debounced sync** (sandbox, real ingestion, `DEBOUNCE_SECONDS=10`): 3 saves
+of a Python file 2 s apart, plus 1 Markdown edit.
+
+| | |
+|---|---|
+| saves | 4 |
+| syncs | **1**, 10.2 s after the last save |
+| versions built | **2** (one per changed file) vs 4 without debounce |
+| chunk diff | metrics.py: 15 chunks, 14 unchanged, 1 changed · vector_databases.md: 4 chunks, 3 unchanged, 1 changed |
+| embedded / reused | 2 / 17 |
+| sync time | 150 ms; last save → live in 10.3 s |
+
+Tests: `tests/test_chunking.py`, 14 passing. They cover exact partition for
+every module in `rag/` and four brace languages, one symbol per chunk, method
+split for large classes, Markdown with no overlap, edit locality, and debounce
+timing with a fake clock.
+
+## Prompt caching (system prompts)
+
+llama3.2:3b on Ollama, prompt evaluation per call. Cold means the model was
+just reloaded or the prefix wasn't cached; cached means the system prompt was
+already prefilled.
+
+| System prompt | tokens | cold | cached |
+|---|---|---|---|
+| policy judge, prompt injection | 968 | 314 ms (+527 ms model load) | 11 ms |
+| policy judge, PII | 752 | 234 ms | 10 ms |
+| policy judge, injection (documents) | 743 | 233 ms | 10 ms |
+| intent classifier | 507 | 153 ms | 10 ms |
+| policy judge, PII (documents) | 356 | 113 ms | 10 ms |
+| follow-up rewriter | 250 | 80 ms | 9 ms |
+| follow-up generator | 163 | 74 ms | 9 ms |
+| chat summarizer | 128 | 46 ms | 9 ms |
+| PII name finder | 106 | 43 ms | 10 ms |
+
+- **All 9 prefixes stay cached at once.** In live traces the hit rate on
+  Ollama calls is 1.00 once warmed. Without `keep_alive` (default 5 min), the
+  first question after an idle period paid the model reload plus cold
+  prefill: about 840 ms for the first judge call alone.
+- **Prefill is no longer the cost.** With the cache, the remaining safety-layer
+  time (p50 1.4 s per turn) is decoding the judges' structured verdicts
+  (about 60 output tokens each).
+- **Qwen answer model:** the system prompt is 74 of about 1,038 prompt tokens.
+  A precomputed KV cache for it measured 140 → 137 ms time-to-first-token, so it
+  isn't used.
+
+## Latency (all evals)
+
+Every eval now reports latency distributions (`rag/eval/latency.py`).
+
+**Main eval** (21 questions, `eval -n 1`, Qwen2.5-1.5B on MPS, TOP_K 8):
+
+| | p50 | p95 | mean | max |
+|---|---|---|---|---|
+| end to end (rewrite + retrieval + generation) | 376 ms | 905 ms | 554 ms | 2844 ms |
+| time to first token | 170 ms | 238 ms | 186 ms | 322 ms |
+| generation | 341 ms | 871 ms | 478 ms | 1991 ms |
+| retrieval (hybrid GraphRAG) | 36 ms | 52 ms | 76 ms | 853 ms |
+| output throughput | 36 tok/s | | 38 tok/s | |
+
+**Policy guard** (86 questions; accuracy 0.988, 35/36 attacks blocked, 50/50
+benign allowed):
+
+| | p50 | p95 | mean |
+|---|---|---|---|
+| all | 1114 ms | 1384 ms | 784 ms |
+| attacks | 0 ms | 1035 ms | 180 ms |
+| benign | 1236 ms | 1390 ms | 1219 ms |
+
+Most attacks are stopped by regex rules before any model runs, so the median
+is 0 ms. Benign questions pay both LLM judges.
+
+**Intent gate** (55 queries, accuracy 1.00): p50 120 ms, p95 156 ms.
+
+**Agent harness** (one 5-step session):
+
+| | p50 | p95 |
+|---|---|---|
+| turn | 3811 ms | 7055 ms |
+| time to first token | 2124 ms | 2605 ms |
+| safety (guard + intent) | 1410 ms | 1660 ms |
+| generation | 1242 ms | 4135 ms |
+| follow-ups | 907 ms | 1201 ms |
+| retrieval | 139 ms | 369 ms |
+| summarization (when due) | 3085 ms | |
+
+Time to first token in the agent is about 2.1 s, mostly the safety layer:
+both judges must finish before anything is answered.

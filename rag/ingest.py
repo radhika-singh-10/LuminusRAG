@@ -16,6 +16,7 @@ For every file in DATA_DIR:
 """
 import hashlib
 import shutil
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -25,33 +26,40 @@ from langchain_core.documents import Document
 
 from . import config
 from . import versioning as V
-from .chunking import chunk_text
+from .chunking import chunk_code, chunk_text
+from .code_chunking import language_for
 from .policy import sanitize_document
 from .store import get_vectorstore
 
-CHUNKER_VERSION = "structure-v1"
+CHUNKER_VERSION = "structure-v2"  # v2: code chunked by function / class
 OCR_VERSION = "rapidocr-v1"
-SUPPORTED = {".pdf", ".txt", ".md"}
+from .code_chunking import LANGUAGES
+
+TEXT_TYPES = {".txt", ".md"}
+SUPPORTED = {".pdf"} | TEXT_TYPES | set(LANGUAGES)
 UPLOAD_DIR_NAME = "uploads"
 
 
-def load_documents(data_dir: Path) -> list[Document]:
-    """Load .pdf, .txt and .md files recursively from data_dir."""
+def load_documents(data_dir: Path, only: set[str] | None = None) -> list[Document]:
+    """Load .pdf, .txt, .md and source-code files recursively from data_dir
+    (only the given absolute paths, if `only` is set)."""
     if not data_dir.exists():
         raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
     docs: list[Document] = []
-    docs += DirectoryLoader(
-        str(data_dir), glob="**/*.pdf", loader_cls=PyPDFLoader, silent_errors=True
-    ).load()
-    for pattern in ("**/*.txt", "**/*.md"):
-        docs += DirectoryLoader(
-            str(data_dir),
-            glob=pattern,
-            loader_cls=TextLoader,
-            loader_kwargs={"encoding": "utf-8"},
-            silent_errors=True,
-        ).load()
+    for path in sorted(data_dir.rglob("*")):
+        ext = path.suffix.lower()
+        if not path.is_file() or ext not in SUPPORTED or path.name.startswith("."):
+            continue
+        if only is not None and str(path.resolve()) not in only:
+            continue
+        try:
+            if ext == ".pdf":
+                docs += PyPDFLoader(str(path)).load()
+            else:
+                docs += TextLoader(str(path), encoding="utf-8").load()
+        except Exception as e:  # unreadable file: skip it, keep going
+            print(f"Warning: could not load {path}: {type(e).__name__}: {e}")
     return docs
 
 
@@ -107,7 +115,8 @@ def save_upload(name: str, data: bytes) -> Path:
     """Write an uploaded file into DATA_DIR/uploads (safe filename) and return its path."""
     safe = Path(name).name
     if Path(safe).suffix.lower() not in SUPPORTED:
-        raise ValueError(f"Unsupported file type: {safe} (use .pdf, .txt or .md)")
+        raise ValueError(f"Unsupported file type: {safe} (use .pdf, .txt, .md or a source file: "
+                         f"{', '.join(sorted(LANGUAGES))})")
     dest_dir = config.DATA_DIR / UPLOAD_DIR_NAME
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / safe
@@ -194,21 +203,49 @@ def _chunk_document(file_docs: list[Document]) -> list:
     return chunks
 
 
-def ingest(rebuild: bool = False, progress=None) -> dict:
+def _chunk_code_file(source: str, text: str, sanitized: dict) -> list:
+    """Code: chunk the original source by syntax first (sanitizing first could
+    remove lines and break parsing), then sanitize each chunk's code."""
+    language = language_for(source)
+    chunks = chunk_code(text, language, Path(source).name)
+    for c in chunks:
+        heading, _, body = c.text.partition("\n\n")
+        clean, rep = sanitize_document(body)
+        sanitized["dropped"] += rep["dropped_paragraphs"]
+        sanitized["redacted"] |= set(rep["redacted"])
+        c.text = f"{heading}\n\n{clean}"
+    return [c for c in chunks if c.text.partition("\n\n")[2].strip()]
+
+
+_INGEST_LOCK = threading.RLock()  # the watcher thread and UI uploads never index at once
+
+
+def ingest(rebuild: bool = False, progress=None, only: set[str] | None = None) -> dict:
+    with _INGEST_LOCK:
+        return _ingest(rebuild, progress, only)
+
+
+def _ingest(rebuild: bool = False, progress=None, only: set[str] | None = None) -> dict:
     """Sync the vector store with DATA_DIR using versioned, content-addressed chunks.
 
+    only: absolute paths to sync (the debounced watcher passes the files that
+    changed); other files are left alone. A path in `only` that no longer
+    exists is retired.
+
     progress: optional callback(event: str, info: dict) for UIs. Events:
-      "loaded", "skip", "ocr", "sanitized", "split", "embed", "graph", "graph_progress",
-      "activated", "stored", "removed", "gc_scheduled"
+      "loaded", "skip", "ocr", "sanitized", "diff", "split", "embed", "graph",
+      "graph_progress", "activated", "stored", "removed", "gc_scheduled"
     """
     emit = progress or (lambda event, info: None)
     batch_size = 32
     if rebuild and config.PERSIST_DIR.exists():
         shutil.rmtree(config.PERSIST_DIR)
 
-    docs = load_documents(config.DATA_DIR)
-    if not docs:
-        raise RuntimeError(f"No .pdf/.txt/.md files found in {config.DATA_DIR}")
+    if only is not None:
+        only = {str(Path(p).resolve()) for p in only}
+    docs = load_documents(config.DATA_DIR, only)
+    if not docs and only is None:
+        raise RuntimeError(f"No supported files found in {config.DATA_DIR}")
     by_source: dict[str, list[Document]] = defaultdict(list)
     for d in docs:
         by_source[d.metadata["source"]].append(d)
@@ -237,17 +274,24 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
         # Security: drop prompt-injection passages and redact PII before anything
         # is embedded or stored (policies/prompt_injection.json, policies/pii.json).
         sanitized = {"dropped": [], "redacted": set(), "hidden": 0}
-        for d in file_docs:
-            d.page_content, rep = sanitize_document(d.page_content)
-            sanitized["dropped"] += rep["dropped_paragraphs"]
-            sanitized["redacted"] |= set(rep["redacted"])
-            sanitized["hidden"] += rep["html_comments"] + rep["images"]
+        is_code = language_for(source) is not None
+        if is_code:
+            chunks = _chunk_code_file(source, file_docs[0].page_content, sanitized)
+        else:
+            for d in file_docs:
+                d.page_content, rep = sanitize_document(d.page_content)
+                sanitized["dropped"] += rep["dropped_paragraphs"]
+                sanitized["redacted"] |= set(rep["redacted"])
+                sanitized["hidden"] += rep["html_comments"] + rep["images"]
+            chunks = _chunk_document(file_docs)
         emit("sanitized", {"source": source, "dropped": sanitized["dropped"],
                            "redacted": sorted(sanitized["redacted"]), "hidden": sanitized["hidden"]})
 
-        # Structure-aware chunks with content-addressed ids.
+        # Chunks by structure (headings / paragraphs, or functions / classes for
+        # code) with content-addressed ids: no overlap, so an edit changes only
+        # the chunks it touches.
         records, unique = [], {}
-        for c in _chunk_document(file_docs):
+        for c in chunks:
             cid = V.chunk_id_for(doc_id, c.text)
             if cid in unique:  # identical chunk twice in one document: store once
                 continue
@@ -257,6 +301,10 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
         ids = [r["chunk_id"] for r in records]
         existing = set(store.get(ids=ids, include=[])["ids"]) if ids else set()
         new_ids = [i for i in ids if i not in existing]
+        previous = {r["chunk_id"] for r in V.version_chunks(doc_id)} if doc_id in known else set()
+        diff = {"source": source, "total": len(ids), "unchanged": len(set(ids) & previous),
+                "added": len(set(ids) - previous), "removed": len(previous - set(ids))}
+        emit("diff", diff)
         text_pages = [d for d in file_docs if d.page_content.strip()]
         report = {
             "source": source, "status": status,
@@ -268,6 +316,7 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
             "injections_removed": len(sanitized["dropped"]), "hidden_removed": sanitized["hidden"],
             "pii_redacted": ", ".join(sorted(sanitized["redacted"])) or "-",
             "ocr_pages": len(ocr["pages"]), "ocr_confidence": ocr["confidence"],
+            "changed_chunks": diff["added"], "removed_chunks": diff["removed"],
         }
         emit("split", report)
         if not records:
@@ -287,7 +336,8 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
                         "source": source, "doc_id": doc_id, "content_hash": unique[i].content_hash,
                         "heading": unique[i].heading,
                         **({"page": unique[i].page} if unique[i].page is not None else {}),
-                        **({"ocr": True} if unique[i].page in ocr_pages else {})})
+                        **({"ocr": True} if unique[i].page in ocr_pages else {}),
+                        **{k: v for k, v in unique[i].meta.items() if v}})
                      for i in batch], ids=batch)
                 emit("embed", {"source": source, "done": min(start + batch_size, len(new_ids)),
                                "total": len(new_ids)})
@@ -311,6 +361,8 @@ def ingest(rebuild: bool = False, progress=None) -> dict:
         emit("stored", report)
 
     for doc_id, source in known.items():
+        if only is not None and str(Path(source).resolve()) not in only:
+            continue  # not part of this sync
         if doc_id not in seen_docs:
             V.retire_document(doc_id)
             stats["removed_files"] += 1

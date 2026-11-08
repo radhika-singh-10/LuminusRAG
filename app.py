@@ -14,7 +14,7 @@ from rag.history import (
     delete_chat, list_chats, load_messages, new_chat_id, redact_question,
     summarize_all, summarize_chat, summarize_messages,
 )
-from rag.ingest import get_chunks, ingest, list_indexed, remove_source, save_upload
+from rag.ingest import SUPPORTED, get_chunks, ingest, list_indexed, remove_source, save_upload
 
 st.set_page_config(page_title="LuminusRAG", page_icon="✨", layout="wide")
 
@@ -32,6 +32,13 @@ def cached_agent():
 
 
 USER_ID = "local"
+
+
+@st.cache_resource
+def data_watcher():
+    from rag.watcher import Watcher
+
+    return Watcher()
 
 
 def source_label(meta: dict) -> str:
@@ -65,6 +72,8 @@ def answer_meta(result: dict) -> str:
         parts.append(f"step {result['step']}/{result['max_steps']}")
     if (m := result.get("metrics") or {}).get("lexical_grounding") is not None:
         parts.append(f"grounding {m['lexical_grounding']:.2f}")
+    if result.get("trace_id"):
+        parts.append(f"🔭 trace `{result['trace_id'][:8]}`")
     if result.get("output_actions"):
         parts.append(f"🧹 answer cleaned: {'; '.join(result['output_actions'])}")
     guard = result.get("guard")
@@ -107,6 +116,10 @@ def process_uploads(files) -> None:
                     st.caption(f"{d['rule']}: {d['text'][:100]}…")
             elif event == "skip":
                 st.write(f"↷ `{name}` unchanged, skipped")
+            elif event == "diff":
+                st.write(f"🧮 **Chunk diff** — `{name}`: {info['total']} chunks · "
+                         f"{info['unchanged']} unchanged · **{info['added']} new/changed** · "
+                         f"{info['removed']} removed")
             elif event == "ocr":
                 key = f"__ocr__{name}"
                 if key not in bars:
@@ -181,7 +194,8 @@ with st.sidebar:
     model = config.HF_LLM_MODEL if config.LLM_PROVIDER == "huggingface" else config.LLM_MODEL
     st.caption(
         f"**LLM:** `{model}`  \n**Embeddings:** `{config.EMBED_MODEL.split('/')[-1]}`  \n"
-        f"**Chunking:** {config.CHUNK_SIZE} chars, {config.CHUNK_OVERLAP} overlap  \n"
+        f"**Chunking:** by heading / paragraph, code by function & class; ≤{config.CHUNK_SIZE} chars, "
+        f"no overlap  \n"
         f"**Retrieval:** {config.RETRIEVAL_MODE}, top {config.TOP_K}"
         f"{', reranked' if config.RERANK else ''}  \n"
         f"**Intent gate:** {'`' + config.INTENT_MODEL + '`' if config.INTENT_ENABLED else 'off'}  \n"
@@ -189,6 +203,42 @@ with st.sidebar:
         f"**Web fallback:** {'on (DuckDuckGo)' if config.WEB_FALLBACK else 'off'}"
         f"{', saves results' if config.WEB_FALLBACK and config.WEB_STORE else ''}"
     )
+
+    # ----- prompt cache -----
+    from rag.prompt_cache import warm_in_background
+
+    warm = warm_in_background()  # once per server process, in the background
+    if config.PROMPT_CACHE_WARMUP:
+        if warm["finished"]:
+            ok = [r for r in (warm["results"] or {}).values() if "error" not in r]
+            st.caption(f"⚡ Prompt cache: {len(ok)} system prompts prefilled at {warm['finished']} "
+                       f"(kept {config.OLLAMA_KEEP_ALIVE})")
+        else:
+            st.caption("⚡ Prompt cache: prefilling system prompts…")
+
+    # ----- auto-sync (debounced watcher) -----
+    st.divider()
+    st.subheader("🔁 Auto-sync")
+    watcher = data_watcher()
+    on = st.toggle(f"Watch `data/` (debounced {config.DEBOUNCE_SECONDS:.0f} s)",
+                   value=bool(watcher.thread and watcher.thread.is_alive()),
+                   help="Edits to files in the data folder are re-indexed after no file has "
+                        f"changed for {config.DEBOUNCE_SECONDS:.0f} s: chunk diff, then a new version "
+                        "that replaces only the changed chunks.")
+    if on:
+        watcher.start()
+        wait = watcher.debouncer.remaining()
+        if wait is not None:
+            st.caption(f"⏳ {len(watcher.debouncer.pending)} changed file(s); syncing in {wait:.0f} s")
+        elif watcher.history:
+            last = watcher.history[-1]
+            st.caption(f"Last sync {last['finished']}: {len(last['files'])} file(s), "
+                       f"{last['stats'].get('chunks_written', 0)} chunks embedded, "
+                       f"{last['stats'].get('chunks_reused', 0)} reused ({last['seconds']}s)")
+        else:
+            st.caption("Watching for changes…")
+    else:
+        watcher.stop()
 
     # ----- personalization -----
     st.divider()
@@ -235,20 +285,21 @@ with st.sidebar:
                 st.session_state.messages = []
             st.rerun()
 
-tab_upload, tab_ask, tab_history, tab_docs, tab_graph, tab_eval = st.tabs(
-    ["📤 Upload & process", "💬 Ask", "🗂 History", "📚 Documents", "🕸 Graph", "📊 Evaluate"]
+tab_upload, tab_ask, tab_history, tab_docs, tab_graph, tab_eval, tab_traces = st.tabs(
+    ["📤 Upload & process", "💬 Ask", "🗂 History", "📚 Documents", "🕸 Graph", "📊 Evaluate",
+     "🔭 Traces"]
 )
 
 # ---------- upload & process ----------
 
 with tab_upload:
     st.subheader("Upload documents")
-    st.caption("PDF, TXT or Markdown. New files are processed automatically: "
+    st.caption("PDF, TXT, Markdown or source code. New files are processed automatically: "
                "extract text (OCR for scanned PDF pages) → policy check (remove prompt injection, redact PII) → "
                "split into chunks → embed → store in Chroma.")
     files = st.file_uploader(
         "Drop files here",
-        type=["pdf", "txt", "md"],
+        type=sorted(ext.lstrip(".") for ext in SUPPORTED),
         accept_multiple_files=True,
         label_visibility="collapsed",
     )
@@ -594,3 +645,64 @@ with tab_eval:
         cfg = s["config"]
         st.caption(f"{cfg['n_questions']} questions × {cfg['n_samples']} samples in "
                    f"{cfg['seconds']}s · saved to `{s['results_dir']}`")
+
+# ---------- traces ----------
+
+with tab_traces:
+    from rag import observability as obs
+
+    st.subheader("Traces")
+    st.caption("Every question is one trace: a tree of LangChain runs (graph nodes, layer tools, "
+               "retrievers, prompts, LLM calls) with timing, status, tokens and PII-redacted "
+               "inputs/outputs. Stored locally in `traces/traces.sqlite`"
+               + (f"; also sent to LangSmith project `{config.LANGSMITH_PROJECT}` (redacted)."
+                  if config.TRACE_LANGSMITH else "."))
+    if not config.TRACE_LOCAL:
+        st.info("Local tracing is off (TRACE_LOCAL=false).")
+    only_chat = st.toggle("This chat only", value=False)
+    rows = obs.list_traces(200, st.session_state.chat_id if only_chat else None)
+    if not rows:
+        st.info("No traces yet. Ask a question in the **Ask** tab.")
+    else:
+        lat = sorted(r["latency_ms"] or 0 for r in rows)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Traces", len(rows))
+        c2.metric("p50 latency", f"{lat[len(lat) // 2] / 1000:.1f}s")
+        c3.metric("p95 latency", f"{lat[min(len(lat) - 1, int(0.95 * len(lat)))] / 1000:.1f}s")
+        c4.metric("Errors", sum(r["status"] == "error" for r in rows))
+        c5.metric("LLM tokens", f"{sum(r['tokens'] or 0 for r in rows):,}")
+        table = pd.DataFrame([{
+            "time": (r["start"] or "")[:19].replace("T", " "), "trace": r["trace_id"][:8],
+            "name": r["name"], "question": r["question"], "ms": r["latency_ms"], "spans": r["spans"],
+            "LLM calls": r["llm_calls"], "cache hits": r.get("cache_hits"), "tokens": r["tokens"],
+            "status": r["status"],
+        } for r in rows])
+        st.dataframe(table, hide_index=True, width="stretch")
+        pick = st.selectbox("Open a trace", [r["trace_id"] for r in rows],
+                            format_func=lambda t: next(f"{r['trace_id'][:8]} · {r['question'] or r['name']}"
+                                                       for r in rows if r["trace_id"] == t))
+        if pick and (t := obs.get_trace(pick)):
+            st.markdown(f"**{t['name']}** · `{t['trace_id']}` · {t['latency_ms']} ms · "
+                        f"{len(t['spans'])} spans · {t['llm_calls']} LLM calls · status {t['status']}")
+            if t["error"]:
+                st.error(t["error"])
+            st.dataframe(pd.DataFrame([{
+                "span": "\u2003" * sp["depth"] + sp["name"], "type": sp["run_type"], "ms": sp["latency_ms"],
+                "status": sp["status"], "model": sp["model"], "tokens in": sp["tokens_in"],
+                "tokens out": sp["tokens_out"], "prompt ms": sp.get("prompt_ms"),
+                "prompt cache": {True: "hit", False: "miss"}.get(sp.get("cache_hit"), ""),
+            } for sp in t["spans"]]), hide_index=True, width="stretch", height=420)
+            names = [f"{i}. {sp['name']} [{sp['run_type']}]" for i, sp in enumerate(t["spans"])]
+            which = st.selectbox("Span details", range(len(names)), format_func=lambda i: names[i])
+            sp = t["spans"][which]
+            a, b = st.columns(2)
+            with a:
+                st.markdown("**Inputs** (redacted)")
+                st.code(sp["inputs"] or "", language="json", wrap_lines=True)
+            with b:
+                st.markdown("**Outputs** (redacted)")
+                st.code(sp["outputs"] or "", language="json", wrap_lines=True)
+            if sp["error"]:
+                st.error(sp["error"])
+        with st.expander("Latency and errors by span (recent traces)"):
+            st.dataframe(pd.DataFrame(obs.span_stats()), hide_index=True, width="stretch")

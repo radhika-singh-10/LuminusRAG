@@ -10,6 +10,7 @@ from pathlib import Path
 from .. import config
 from ..intent import classify_intent
 from . import metrics as M
+from .latency import fmt_stats, latency_stats
 
 
 def run_intent_eval(path: Path | None = None) -> dict:
@@ -19,8 +20,11 @@ def run_intent_eval(path: Path | None = None) -> dict:
     tp = fp = fn = tn = errors = 0
     mistakes = []
     t0 = time.time()
+    lat = []
     for item in items:
+        t1 = time.perf_counter()
         intent = classify_intent(item["question"])
+        lat.append((time.perf_counter() - t1) * 1000)
         if intent.category == "error":
             errors += 1
             mistakes.append({**item, "predicted": "error", "detail": intent.error})
@@ -42,13 +46,14 @@ def run_intent_eval(path: Path | None = None) -> dict:
         "false_allowed": fp,
         "false_blocked": fn,
         "seconds_per_query": round((time.time() - t0) / len(items), 2),
+        "latency_ms": latency_stats(lat),
         "mistakes": mistakes,
     }
     print(f"\nIntent gate ({config.INTENT_MODEL}): {report['n']} queries, {errors} errors")
     for key in ("accuracy", "precision", "recall", "f1"):
         print(f"  {key:<18} {report[key]:.3f}")
     print(f"  {'false allowed':<18} {fp}\n  {'false blocked':<18} {fn}")
-    print(f"  {'secs per query':<18} {report['seconds_per_query']}")
+    print(f"  {'latency':<18} {fmt_stats(report['latency_ms'])}")
     for m in mistakes:
         print(f"  MISS expected_allowed={m['allowed']} got={m['predicted']}: {m['question']}")
     return report

@@ -90,11 +90,12 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
 def build_answer_chain(llm: BaseChatModel) -> Runnable:
     """{"context": list[Document], "question": str} -> answer str."""
     return (
-        (lambda x: {"context": format_docs(x["context"]), "question": x["question"]})
+        RunnableLambda(lambda x: {"context": format_docs(x["context"]), "question": x["question"]},
+                       name="format_context")
         | PROMPT
         | llm
         | StrOutputParser()
-    )
+    ).with_config(run_name="answer_chain")
 
 
 def build_chain(llm: BaseChatModel | None = None) -> Runnable:
@@ -214,6 +215,25 @@ class GuardedPipeline:
         return "".join(parts).strip(), sorted(actions), False
 
     def events(self, question: str, history: list[dict] | None = None):
+        """Traced wrapper around _events: one trace per question (see
+        rag/observability.py); the final result carries its trace_id."""
+        from .observability import traced
+
+        with traced("guarded_pipeline", {"question": question}, tags=["pipeline"]) as t:
+            gen = self._events(question, history)
+            step = (lambda: t["context"].run(next, gen)) if t["context"] else (lambda: next(gen))
+            while True:
+                try:
+                    event = step()
+                except StopIteration:
+                    break
+                if event["type"] == "final":
+                    event["result"]["trace_id"] = t["trace_id"]
+                    t["outputs"] = {"answer": event["result"]["answer"],
+                                    "origin": event["result"].get("origin")}
+                yield event
+
+    def _events(self, question: str, history: list[dict] | None = None):
         """history: earlier messages [{role, content}], oldest first, used to
         rewrite follow-up questions (see rag/followup.py)."""
         from .intent import Intent

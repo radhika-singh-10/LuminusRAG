@@ -34,11 +34,10 @@ JUDGE_PROMPT = ChatPromptTemplate.from_messages([
 @lru_cache(maxsize=1)
 def _judge():
     from langchain_core.output_parsers import StrOutputParser
-    from langchain_ollama import ChatOllama
+    from ..prompt_cache import chat_ollama
 
-    llm = ChatOllama(model=config.JUDGE_MODEL, base_url=config.OLLAMA_BASE_URL,
-                     temperature=0, num_predict=30)
-    return JUDGE_PROMPT | llm | StrOutputParser()
+    llm = chat_ollama(config.JUDGE_MODEL, temperature=0, num_predict=30)
+    return (JUDGE_PROMPT | llm | StrOutputParser()).with_config(run_name="llm_judge")
 
 
 def judge_answer(question: str, reference: str, answer: str, answerable: bool = True) -> dict:
