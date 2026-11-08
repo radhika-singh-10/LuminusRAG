@@ -125,6 +125,7 @@ LuminusRAG/
 │   ├── ingest.py        # load -> OCR -> sanitize -> chunk -> versioned, content-addressed upsert
 │   ├── ocr.py           # OCR for scanned PDF pages (RapidOCR + pypdfium2, local)
 │   ├── observability.py # LangChain tracers: local SQLite span store, opt-in LangSmith (redacted)
+│   ├── guardrails.py    # LangChain PII guardrail rules in/out + policy guard as create_agent middleware
 │   ├── chunking.py      # stable structure-aware chunking (headings, sections, paragraphs), no overlap
 │   ├── code_chunking.py # code chunked by imports / function / class / method (ast + brace scanner)
 │   ├── watcher.py       # debounced re-indexing: quiet period -> chunk diff -> new version
@@ -295,6 +296,65 @@ agent_turn [chain] 8661 ms
 - The **🔭 Traces** tab shows trace count, p50/p95 latency, errors and LLM tokens,
   with a per-trace span tree and redacted inputs and outputs for any span.
 - `python main.py traces [ID] [--stats]` shows the same in the terminal.
+
+## LangChain guardrails and a fast guard
+
+**LangChain's PII guardrail** (`rag/guardrails.py`). LangChain 1.x ships PII
+detectors and strategies (`RedactionRule`: email, credit_card, ip,
+mac_address; block / redact / mask / hash). They run as an extra
+deterministic layer in the guard:
+
+- **Input:** a credit card number blocks the question; emails, IP and MAC
+  addresses are redacted before any model sees the text.
+- **Output:** the same types are redacted in every streamed segment.
+
+LangChain's `[REDACTED_EMAIL]` placeholders match ours. LangChain adds
+MAC addresses, which `policies/pii.json` didn't cover; ours covers SSNs,
+IBANs, secrets, phone numbers and more.
+
+**Policy guard as LangChain middleware.** `PolicyGuardMiddleware` runs
+`check_query` in `before_agent` (stopping the agent with the rejection
+message) and `sanitize_output` in `after_agent`. `guardrail_middleware()`
+pairs it with LangChain's `PIIMiddleware`, so any `create_agent` agent gets
+the same guardrails:
+
+```python
+from langchain.agents import create_agent
+from rag.guardrails import guardrail_middleware
+
+agent = create_agent(model, tools, middleware=guardrail_middleware())
+```
+
+`tests/test_guardrails.py` checks this with a real `create_agent` agent:
+
+- **Injection** is stopped before the model is called.
+- **Input PII:** an email in the question never reaches the model.
+- **Output PII:** IP addresses and emails in the reply are redacted.
+- **Benign questions** pass unchanged.
+
+The harness itself is a LangGraph state machine, so it calls the same checks
+from its safety node and output sanitizer instead of middleware hooks.
+
+**Compact verdicts** (`GUARD_VERDICT=compact`). With the system prompts
+served from the prompt cache, the judges' cost was decoding their answers:
+about 60 tokens of JSON with a verdict, reason and evidence, around 600 ms
+each. For questions the judges now reply with one line, `SAFE` or
+`UNSAFE PI-02`, capped at 8 tokens. A line that can't be parsed falls back to
+the structured judge.
+
+- **Why the reason can go:** rejections only name the rule, never echo the text.
+- **Documents keep the structured verdict,** because the quoted evidence is
+  verified against the passage.
+- **Parallel judges were tested and dropped:** running the two in parallel
+  gave nothing (1,221 → 1,166 ms), since Ollama serves one request at a time.
+
+| | before (JSON verdict) | compact verdict |
+|---|---|---|
+| guard p50 / p95 per question (86 questions) | 1,114 / 1,384 ms | **77 / 160 ms** |
+| attacks blocked / benign allowed | 35/36 · 50/50 | 35/36 · 50/50 |
+| agent safety layer p50 | 1,410 ms | **280 ms** |
+| agent time to first token p50 | 2,124 ms | **1,222 ms** |
+| agent turn p50 | 3,811 ms | **2,849 ms** |
 
 ## Prompt caching
 
@@ -785,6 +845,7 @@ Each run writes `per_question.jsonl` and `summary.json` under `eval/results/`.
 | `CODE_MAX_CHARS` | `4000` (a longer function is split at its top-level statements) |
 | `DEBOUNCE_SECONDS` / `DEBOUNCE_MAX_SECONDS` / `WATCH_POLL_SECONDS` | `10` / `60` / `1` |
 | `OLLAMA_KEEP_ALIVE` / `PROMPT_CACHE_WARMUP` | `30m` / `true` |
+| `GUARD_VERDICT` / `LANGCHAIN_PII` | `compact` (or `structured`) / `true` |
 | `GC_GRACE_SECONDS` / `GC_STALE_BUILD_SECONDS` | `5` / `3600` |
 | `TOP_K` / `SEARCH_TYPE` | `8` / `similarity` (or `mmr`) |
 | `RETRIEVAL_MODE` / `GRAPH_K` | `hybrid` (or `vector`, `graph`) / `2` |

@@ -117,3 +117,7 @@ LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "luminusrag")
 # cache loaded, and prefill the fixed system prompts at startup
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 PROMPT_CACHE_WARMUP = os.getenv("PROMPT_CACHE_WARMUP", "true").lower() == "true"
+
+# Guard latency + LangChain guardrails
+GUARD_VERDICT = os.getenv("GUARD_VERDICT", "compact")  # "compact" (SAFE / UNSAFE <rule>) or "structured"
+LANGCHAIN_PII = os.getenv("LANGCHAIN_PII", "true").lower() == "true"  # LangChain PII rules in/out

@@ -58,12 +58,14 @@ def system_prompts() -> dict:
     from .followup import _contextualizer
     from .history import SUMMARY_PROMPT
     from .intent import _classifier
-    from .policy import _judge, _name_finder
+    from .policy import _compact_judge, _judge, _name_finder
 
+    query_judge = (lambda name: _compact_judge(name)) if config.GUARD_VERDICT == "compact" else (
+        lambda name: _judge(name, "query"))
     out = {
-        "policy_judge:prompt_injection:query": (config.GUARD_MODEL, _first(_judge("prompt_injection", "query")),
+        "policy_judge:prompt_injection:query": (config.GUARD_MODEL, _first(query_judge("prompt_injection")),
                                                 {"text": "What is HNSW?"}),
-        "policy_judge:pii:query": (config.GUARD_MODEL, _first(_judge("pii", "query")), {"text": "What is HNSW?"}),
+        "policy_judge:pii:query": (config.GUARD_MODEL, _first(query_judge("pii")), {"text": "What is HNSW?"}),
         "intent_classifier": (config.INTENT_MODEL, _first(_classifier()),
                               {"question": "What is HNSW?", "conversation": ""}),
         "followup_rewriter": (config.GUARD_MODEL, _first(_contextualizer()),

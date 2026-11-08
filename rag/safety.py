@@ -191,6 +191,14 @@ def sanitize_output(answer: str, allowed_urls: set[str]) -> tuple[str, list[str]
     answer, kinds = redact_pii(answer)
     if kinds:
         actions.append("redacted " + ", ".join(kinds))
+    from . import config
+
+    if config.LANGCHAIN_PII:  # LangChain's PII guardrail rules (rag/guardrails.py)
+        from .guardrails import langchain_pii_output
+
+        answer, lc_found = langchain_pii_output(answer)
+        if lc_found:
+            actions.append("redacted " + ", ".join(lc_found) + " (LangChain PII)")
     return answer, sorted(set(actions))
 
 

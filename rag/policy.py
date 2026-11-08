@@ -131,6 +131,54 @@ def _judge(policy_name: str, mode: str):
         run_name=f"policy_judge:{policy_name}:{mode}")
 
 
+# Questions get a compact verdict: one line, "SAFE" or "UNSAFE <rule id>". The
+# judge's cost is decoding its answer (its system prompt is served from the
+# prompt cache), so a 2-4 token verdict instead of ~60 tokens of JSON cuts the
+# guard from ~1.2 s to a few hundred ms. The reason is not needed: rejections
+# name only the rule, never echo the text. Documents keep the structured
+# verdict, because their evidence quote is verified against the passage.
+_COMPACT_FORMAT = """
+Reply with exactly one line and nothing else:
+SAFE
+or
+UNSAFE <rule id>
+Examples: "SAFE", "UNSAFE PI-02"."""
+_VERDICT_LINE = re.compile(r"^\W*(SAFE|UNSAFE)\b[\s:,-]*([A-Z]{2,4}-\d{2})?", re.IGNORECASE)
+
+
+@lru_cache(maxsize=4)
+def _compact_judge(policy_name: str):
+    from langchain_core.output_parsers import StrOutputParser
+
+    from .prompt_cache import chat_ollama
+
+    llm = chat_ollama(config.GUARD_MODEL, temperature=0, num_predict=8)
+    system = _JUDGE_SYSTEM.format(policy=_policy_text(load_policy(policy_name), "query"),
+                                  mode_hint=_MODE_HINTS["query"])
+    system = system.rsplit("\n- If unsafe", 1)[0] + _COMPACT_FORMAT
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", system.replace("{", "{{").replace("}", "}}")),
+         ("human", "TEXT:\n<text>\n{text}\n</text>")]
+    )
+    return (prompt | llm | StrOutputParser()).with_config(run_name=f"policy_judge:{policy_name}:query")
+
+
+def compact_check(text: str, policy_name: str) -> Verdict:
+    """Fast query check: one-line verdict. Falls back to the structured judge
+    if the line can't be parsed."""
+    raw = _compact_judge(policy_name).invoke({"text": text[:4000]})
+    m = _VERDICT_LINE.match(raw.strip())
+    if not m:
+        return llm_check(text, policy_name, "query")
+    if m.group(1).upper() == "SAFE":
+        return Verdict(verdict="safe")
+    rule_ids = sorted(r["id"] for r in load_policy(policy_name)["rules"] if _applies(r, "query")
+                      and r.get("action") != "redact")
+    rule = (m.group(2) or "").upper()
+    return Verdict(verdict="unsafe", rule_id=rule if rule in rule_ids else rule_ids[0],
+                   reason="flagged by the policy judge")
+
+
 @lru_cache(maxsize=1)
 def _name_finder():
     from .prompt_cache import chat_ollama
@@ -200,17 +248,30 @@ def check_query(text: str, use_llm: bool | None = None) -> GuardResult:
                 if pattern.search(text):
                     return GuardResult(False, "pii", rule["id"], rule["name"], "", "regex")
 
-    # 2. Redact low-risk contact details (rule action "redact").
+    # 2. Redact low-risk contact details (rule action "redact"), then LangChain's
+    #    PII guardrail rules (rag/guardrails.py): a card number blocks, emails /
+    #    IP / MAC addresses are redacted.
     redacted_text, redacted = redact_pii(text)
+    if config.LANGCHAIN_PII:
+        from .guardrails import langchain_pii_input
+
+        redacted_text, lc_found, blocked = langchain_pii_input(redacted_text)
+        if blocked:
+            return GuardResult(False, "pii", "PII-04", _rule("pii", "PII-04")["name"],
+                               f"It contains a {blocked.replace('_', ' ')} (LangChain PII guardrail).",
+                               "langchain")
+        redacted = sorted(set(redacted) | set(lc_found))
 
     # 3. LLM judgment against each policy. The judge sees the question without
     #    the redacted contact details (already handled), so a placeholder such as
     #    [REDACTED_EMAIL] doesn't make an ordinary question look like a PII request.
     if use_llm:
         judged = strip_redactions(redacted_text) if redacted else redacted_text
+        check = compact_check if config.GUARD_VERDICT == "compact" else (
+            lambda t, n: llm_check(t, n, "query"))
         for name in POLICIES:
             try:
-                v = llm_check(judged or redacted_text, name, "query")
+                v = check(judged or redacted_text, name)
             except Exception as e:  # Ollama down, bad output: fail closed
                 return GuardResult(False, name, None, None, f"{type(e).__name__}: {e}", "error")
             if v.verdict == "unsafe":
