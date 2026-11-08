@@ -11,7 +11,8 @@ correctness, pass@k / pass^k, and truthfulness.
 Only AI questions are answered. An Ollama model screens every question,
 personal data is redacted before anything leaves the machine, and when the
 local documents can't answer, the app searches the web and saves what it
-learns. Latest scores are in [results.md](results.md).
+learns. Latest scores are in [results.md](results.md); the research behind
+each layer is cited in [researchpaper.md](researchpaper.md).
 
 ## Architecture
 
