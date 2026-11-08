@@ -926,9 +926,11 @@ flowchart LR
     DB -. "nearest chunks" .-> RET
 ```
 
-1. **Ingest:** files are loaded page by page, hashed, split into overlapping
-   chunks, embedded locally, and upserted into Chroma. Unchanged files are
-   skipped; edited or deleted files are replaced or removed.
+1. **Ingest:** files are loaded page by page (scanned pages are OCR'd),
+   sanitized, split by structure (headings, paragraphs, or functions for
+   code) with no overlap, hashed, embedded locally, and upserted into Chroma
+   as a new document version. Unchanged files and unchanged chunks are
+   skipped; edited or deleted files are replaced or retired.
 2. **Intent gate:** an Ollama model classifies the question as RAG architecture,
    AI model architecture, LLM architecture, general AI, or unsupported.
    Unsupported questions get "Query unsupported" and are never searched.
@@ -975,5 +977,5 @@ answer but isn't consistent.
 ## Ideas to extend
 
 - Use a larger local model (for example Qwen2.5-7B) for graph extraction and judging.
-- Add OCR so scanned PDFs can be indexed.
+- Read multi-column scanned pages in column order and detect headings in OCR text (today a scanned page is read row by row and treated as one section).
 - Per-user document scoping with a tenant field filtered at query time.

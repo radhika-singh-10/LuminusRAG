@@ -1,10 +1,10 @@
-# Research papers behind LuminusRAG
+# Research papers and articles related to LuminusRAG
 
-The research that LuminusRAG's design draws on, grouped by layer, ending with
-harness engineering, the design approach behind the whole system. Each entry
-gives the problem the paper solved and where the idea appears in this project.
-LuminusRAG implements these ideas in simplified form, for a small local model
-and a small corpus. It doesn't reproduce the papers' systems.
+Selected research papers and technical articles related to LuminusRAG's core
+methods and implementation modules, grouped by topic. Entries describe the
+connection to the project; they do not imply that every module is a direct
+implementation of the cited work. LuminusRAG adapts ideas for small local
+models and a small corpus, and does not reproduce the cited systems.
 
 arXiv IDs were checked against arXiv/alphaXiv on 2026-11-07. Papers without an
 arXiv version are cited by venue.
@@ -129,6 +129,62 @@ These are 2026 arXiv preprints; their author lists are long, so the institutions
   (`evaluate_turn`), and offline evals cover sessions, security, the intent
   gate, OCR and personalization.
 
+## 8. Additional work tied to implemented details
+
+These sources cover implementation choices that the earlier list only
+mentioned briefly. The project borrows ideas and evaluation methods; it does
+not reproduce the full systems or benchmarks in these papers.
+
+| # | Citation / article | Problem or contribution | In LuminusRAG |
+|---|---|---|---|
+| 44 | Carbonell, J. and Goldstein, J. **The Use of MMR, Diversity-Based Reranking for Reordering Documents and Producing Summaries.** SIGIR 1998. [DOI: 10.1145/290941.291025](https://doi.org/10.1145/290941.291025) | Selects relevant results while reducing redundancy | Chroma maximal marginal relevance option (`SEARCH_TYPE=mmr`, `rag/store.py`); a retrieval option, separate from the cross-encoder reranker |
+| 45 | He, X., Tian, Y., Sun, Y., et al. **G-Retriever: Retrieval-Augmented Generation for Textual Graph Understanding and Question Answering.** EMNLP 2024. [arXiv:2402.07630](https://arxiv.org/abs/2402.07630) | Retrieves graph context for graph question answering | Related work for graph-backed retrieval and returning source-linked graph facts (`rag/graph.py`); LuminusRAG uses entity matching and neighbor expansion, not G-Retriever's Prize-Collecting Steiner Tree |
+| 46 | Gao, T., Yen, H., Yu, J., and Chen, D. **Enabling Large Language Models to Generate Text with Citations.** EMNLP 2023. [arXiv:2305.14627](https://arxiv.org/abs/2305.14627) | ALCE studies answer quality and citation support in retrieval-augmented generation | Numbered source citations and citation validity metrics (`rag/chain.py`, `rag/eval/metrics.py`); the local metric checks citation presence and index validity, not full claim-level support |
+| 47 | Niu, C., Wu, Y., Zhu, J., et al. **RAGTruth: A Hallucination Corpus for Developing Trustworthy Retrieval-Augmented Language Models.** ACL 2024. [arXiv:2401.00396](https://arxiv.org/abs/2401.00396) | Human-annotated unsupported and contradictory claims in RAG answers | Relevant benchmark context for claim-level truthfulness and hallucination reporting (`rag/eval/truthfulness.py`); this project uses its own evaluation set, not RAGTruth |
+| 48 | Zhan, Q., Liang, Z., Ying, Z., and Kang, D. **InjecAgent: Benchmarking Indirect Prompt Injections in Tool-Integrated Large Language Model Agents.** Findings of ACL 2024. [arXiv:2403.02691](https://arxiv.org/abs/2403.02691) | Measures attacks embedded in external content that attempt to manipulate tool-using agents | Motivates document and web passage sanitization (`rag/policy.py`, `rag/web.py`); LuminusRAG does not expose user-directed action tools and does not claim InjecAgent benchmark coverage |
+| 49 | Debenedetti, E., et al. **AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents.** NeurIPS 2024 Datasets and Benchmarks. [arXiv:2406.13352](https://arxiv.org/abs/2406.13352) | Evaluates prompt injection security together with task utility in tool-using agents | Useful benchmark design reference for the security and benign-query evaluation split (`rag/eval/security_eval.py`, `rag/eval/guard_eval.py`); this project has its own test cases and is not an AgentDojo implementation |
+| 50 | **LangGraph Graph API overview.** LangChain documentation. [Documentation](https://docs.langchain.com/oss/python/langgraph/graph-api) | Describes state graphs, nodes, edges, and control flow for application workflows | Framework documentation for the fixed, conditional pipeline in `rag/agent/harness.py`; this is implementation documentation rather than a research paper |
+| 51 | **Configure Collections.** Chroma documentation. [Documentation](https://docs.trychroma.com/docs/collections/configure) | Documents collection embedding and HNSW index configuration, including distance spaces | Runtime behavior behind the persistent Chroma collection and cosine-space configuration (`rag/store.py`); complements the HNSW paper above |
+| 52 | **Server documentation: prompt caching.** llama.cpp. [Documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) | Documents KV-cache reuse for matching prompt prefixes | Background for keeping local Ollama models warm and reusing fixed prompt prefixes (`rag/prompt_cache.py`); the project's measured timings are in `results.md` |
+| 53 | Gim, I., Chen, G., Lee, S., et al. **Prompt Cache: Modular Attention Reuse for Low-Latency Inference.** MLSys 2024. [arXiv:2311.04934](https://arxiv.org/abs/2311.04934) | Reuses attention/KV states for recurring prompt content to reduce inference latency | Related work for the fixed-system-prompt warm-up and prefix reuse in `rag/prompt_cache.py`. The project relies on Ollama/llama.cpp prefix matching; it does not implement Prompt Cache's explicit modular cache scheme |
+| 54 | Zhang, Y., Zhao, X., Wang, Z. Z., et al. **cAST: Enhancing Code Retrieval-Augmented Generation with Structural Chunking via Abstract Syntax Tree.** Findings of EMNLP 2025. [arXiv:2506.15655](https://arxiv.org/abs/2506.15655) | Uses AST structure to split code into semantically meaningful retrieval units | Closely related to syntax-aware function/class chunking (`rag/code_chunking.py`); this project uses Python `ast` plus brace scanning and does not reproduce cAST's split-and-merge algorithm |
+| 55 | Dong, L., Lu, Q., and Zhu, L. **AgentOps: Enabling Observability of LLM Agents.** 2024. [arXiv:2411.05285](https://arxiv.org/abs/2411.05285) | Taxonomy of agent artifacts and data to trace for monitoring, debugging, and analysis | Direct research context for run/span tracing, latency, errors, token counts, and cache signals (`rag/observability.py`) |
+| 56 | Zhu, K., Ye, X., Han, Z., et al. **AgentDebugX: An Open-Source Toolkit for Failure Observability, Attribution, and Recovery in LLM Agents.** EMNLP 2026 System Demonstrations. [ACL Anthology](https://aclanthology.org/2026.emnlp-demos.52/) | Uses execution trajectories to diagnose agent failures and guide recovery | Related to inspecting spans and identifying failing layers; LuminusRAG records traces and metrics but does not implement AgentDebugX's diagnosis-and-recovery loop |
+| 57 | **LangSmith Observability.** LangChain documentation. [Documentation](https://docs.langchain.com/langsmith/observability) | Describes traces, production metrics, debugging, and monitoring for LLM applications | LangSmith is an opt-in tracing sink in `rag/observability.py`; local SQLite tracing remains available without sending traces to LangSmith |
+| 58 | **Guardrails.** LangChain documentation. [Documentation](https://docs.langchain.com/oss/python/langchain/guardrails) | Describes deterministic checks such as regex and model-based checks, plus middleware hooks | Supports the design vocabulary for regex/PII rules and model checks in `rag/policy.py` and `rag/guardrails.py`; middleware is available for `create_agent`, while the main harness calls the same checks in its LangGraph safety node |
+| 59 | **LLM Prompt Injection Prevention Cheat Sheet.** OWASP Cheat Sheet Series. [Article](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html) | Practical guidance on input screening, layered defenses, and limitations of pattern filters | Relevant to policy regexes and injection sanitization (`rag/safety.py`, `rag/policy.py`); regex catches known patterns but is not a complete security boundary, so this project also uses model checks, output sanitization, and adversarial evaluation |
+
+## What these references do and do not claim
+
+- **GraphRAG** [8] describes a broader query-focused summarization system. The
+  graph code here extracts grounded entity/relation triples and expands nearby
+  nodes; it does not build community summaries or reproduce Microsoft's
+  GraphRAG pipeline.
+- **HippoRAG** [9] motivates knowledge-graph retrieval with Personalized
+  PageRank. LuminusRAG applies a smaller local graph traversal and interest-
+  weighted restart; it does not reproduce HippoRAG's full indexing and
+  retrieval algorithm.
+- **CRAG** [19] and **Self-RAG** [20] are related ideas for assessing retrieval
+  or generation. The web fallback here is driven by a configured local-score
+  threshold and refusal detection; the project does not implement CRAG's
+  retrieval evaluator or Self-RAG's trained reflection tokens.
+- **ReAct** [17] and **Toolformer** [18] are context for agent/tool design. The
+  LuminusRAG harness runs a fixed LangGraph workflow; it does not let the model
+  choose arbitrary tools or learn tool use.
+- **Prompt cache** [53] is related work, not the implementation used here:
+  `rag/prompt_cache.py` warms fixed prompts and relies on the serving runtime's
+  prefix KV-cache reuse.
+- **Guardrails and observability are separate layers.** The LangGraph safety
+  node enforces the guard order in `rag/agent/harness.py`; LangSmith is an
+  optional trace destination, not a guardrail engine. Regex rules are the fast
+  deterministic policy layer, supplemented by an LLM policy judge and output
+  sanitization. See [31]–[33], [55], and [57]–[59].
+- **Watcher and code chunker.** `rag/watcher.py` polls and debounces file
+  changes, then uses content-hash chunk diffs and version activation; this is
+  project-specific ingestion engineering rather than a reproduction of a
+  cited indexing paper. The syntax-aware code chunker has a closer research
+  analogue in cAST [54], with implementation differences noted above.
+
 ## Suggested reading order
 
 1. **RAG** [1] and **Dense X Retrieval** [7]: the core pipeline and why chunking matters.
@@ -137,3 +193,8 @@ These are 2026 arXiv preprints; their author lists are long, so the institutions
 4. **RAGAS** [23] and **τ-bench** [22]: how to measure RAG quality and reliability.
 5. **Greshake et al.** [29] and **Spotlighting** [30]: why retrieved text must be treated as untrusted.
 6. **Harness Engineering: Anatomy…** [36] and **When Agents Fail: Model or Harness** [40]: the harness as the unit of design and evaluation.
+7. **ALCE** [46] and **RAGTruth** [47]: citations and claim-level grounding.
+8. **InjecAgent** [48] and **AgentDojo** [49]: prompt injection evaluation for agents that consume untrusted content.
+9. **AgentOps** [55] and **AgentDebugX** [56]: tracing and diagnosing agent runs; then review the LangSmith and LangChain implementation docs [57]–[58].
+10. **Prompt Cache** [53] and **cAST** [54]: prompt-prefix reuse and syntax-aware code chunking.
+11. **LangChain Guardrails** [58] and the **OWASP prompt-injection guide** [59]: deterministic regex checks, model checks, and their limits in a layered policy.
