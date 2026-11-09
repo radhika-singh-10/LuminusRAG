@@ -69,6 +69,16 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
 
         return ChatAnthropic(model=config.LLM_MODEL, temperature=temperature)
 
+    if config.LLM_PROVIDER == "mlx":
+        from .mlx_chat import MLXChatModel
+
+        return MLXChatModel(
+            model_path=config.MLX_MODEL_PATH,
+            adapter_path=config.MLX_ADAPTER_PATH,
+            temperature=temperature,
+            max_tokens=config.MLX_MAX_TOKENS,
+        )
+
     from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline
     from transformers import pipeline
 

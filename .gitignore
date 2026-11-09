@@ -221,6 +221,7 @@ __marimo__/
 
 # Project
 .venv/
+.venv-mlx/
 chroma_db/
 data/uploads/
 eval/results/
@@ -229,3 +230,7 @@ chats/
 # macOS
 .DS_Store
 traces/
+
+# Local MLX weights and generated LoRA adapters; keep finetune/data tracked
+finetune/models/
+finetune/adapters/

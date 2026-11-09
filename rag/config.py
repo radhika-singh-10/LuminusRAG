@@ -12,10 +12,13 @@ DATA_DIR = Path(os.getenv("DATA_DIR", ROOT / "data"))
 PERSIST_DIR = Path(os.getenv("PERSIST_DIR", ROOT / "chroma_db"))
 COLLECTION = os.getenv("COLLECTION", "docs")
 
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "huggingface")  # "huggingface" or "anthropic"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "huggingface")  # "huggingface", "anthropic", or "mlx"
 LLM_MODEL = os.getenv("LLM_MODEL", "claude-sonnet-4-5")
 HF_LLM_MODEL = os.getenv("HF_LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 HF_MAX_NEW_TOKENS = int(os.getenv("HF_MAX_NEW_TOKENS", "512"))
+MLX_MODEL_PATH = os.getenv("MLX_MODEL_PATH", str(ROOT / "finetune" / "models" / "qwen2.5-1.5b-instruct"))
+MLX_ADAPTER_PATH = os.getenv("MLX_ADAPTER_PATH", str(ROOT / "finetune" / "adapters" / "qwen25-1.5b-v1"))
+MLX_MAX_TOKENS = int(os.getenv("MLX_MAX_TOKENS", "512"))
 EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))  # max chars; chunks never overlap

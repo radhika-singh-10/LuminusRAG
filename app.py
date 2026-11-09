@@ -191,7 +191,11 @@ with st.sidebar:
     c1, c2 = st.columns(2)
     c1.metric("Documents", len(docs))
     c2.metric("Chunks", total_chunks)
-    model = config.HF_LLM_MODEL if config.LLM_PROVIDER == "huggingface" else config.LLM_MODEL
+    model = (
+        config.HF_LLM_MODEL if config.LLM_PROVIDER == "huggingface" else
+        f"{Path(config.MLX_MODEL_PATH).name} + {Path(config.MLX_ADAPTER_PATH).name}"
+        if config.LLM_PROVIDER == "mlx" else config.LLM_MODEL
+    )
     st.caption(
         f"**LLM:** `{model}`  \n**Embeddings:** `{config.EMBED_MODEL.split('/')[-1]}`  \n"
         f"**Chunking:** by heading / paragraph, code by function & class; ≤{config.CHUNK_SIZE} chars, "

@@ -80,6 +80,11 @@ def _count_tokens(text: str) -> int:
         from ..chain import _load_hf_model
 
         return len(_load_hf_model(config.HF_LLM_MODEL)[0].encode(text, add_special_tokens=False))
+    if config.LLM_PROVIDER == "mlx":
+        from ..mlx_chat import _load_model
+
+        _, tokenizer = _load_model(config.MLX_MODEL_PATH, config.MLX_ADAPTER_PATH)
+        return len(tokenizer.encode(text))
     return len(text.split())
 
 
@@ -149,7 +154,11 @@ def run_eval(
     summary = summarize(per_question, ks)
     summary["config"] = {
         "dataset": str(dataset or config.EVAL_DATASET),
-        "llm": config.LLM_MODEL if config.LLM_PROVIDER == "anthropic" else config.HF_LLM_MODEL,
+        "llm": (
+            config.LLM_MODEL if config.LLM_PROVIDER == "anthropic" else
+            f"{config.MLX_MODEL_PATH} + adapter:{config.MLX_ADAPTER_PATH}"
+            if config.LLM_PROVIDER == "mlx" else config.HF_LLM_MODEL
+        ),
         "embed_model": config.EMBED_MODEL,
         "nli_model": config.NLI_MODEL,
         "top_k": top_k or config.TOP_K,
