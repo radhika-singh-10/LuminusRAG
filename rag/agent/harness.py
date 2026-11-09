@@ -26,6 +26,43 @@
 Every tool call is traced (layer, tool, milliseconds, short note). Events
 stream through LangGraph's custom stream: status, token, and a final result.
 """
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_gr_load(_f):
+    """Lineaje-added: load gr_stub_client.py beside _f or in one of its 7 parent folders. Missing or broken:
+    a pass-through client and ONE warning per process (GR_REQUIRE_CLIENT=1: ImportError instead)."""
+    import sys, os, logging, importlib.util as u, pathlib
+    n = "_lineaje_gr_stub_client"
+    if n in sys.modules: return sys.modules[n]
+    h = pathlib.Path(_f or ".").resolve().parent
+    d = [h, *h.parents][:8]
+    p = next((x / "gr_stub_client.py" for x in d if (x / "gr_stub_client.py").is_file()), None)
+    try:
+        s = u.spec_from_file_location(n, p) if p else None
+        if s is None: raise FileNotFoundError("gr_stub_client.py")
+        m = sys.modules[n] = u.module_from_spec(s); s.loader.exec_module(m); return m
+    except Exception as e:
+        sys.modules.pop(n, None)
+        w = ("gr_stub_client.py not found for %s (searched: %s)" % (_f or "<no __file__>", ", ".join(map(str, d)))
+             if p is None else "%s failed to load (%s%s)" % (p, type(e).__name__,
+                                                          " line %s" % e.lineno if isinstance(e, SyntaxError) else ""))
+        w = ("Lineaje guardrail NOT active: " + w + ". Calls pass through unchecked; set GR_REQUIRE_CLIENT=1 to fail "
+             "instead. Each deploy unit needs gr_stub_client.py beside its code and GR_SERVICE_URL plus credentials as "
+             "environment variables.")
+        if os.environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": raise ImportError(w) from (None if p is None else e)
+        z = sys.__dict__.setdefault("_lineaje_gr_null", __import__('types').SimpleNamespace(STUB_API=999999, GuardrailUnavailableError=type('GuardrailUnavailableError', (PermissionError,), {}), SiteDescriptor=lambda *a, **k: None, new_interaction_id=lambda *a, **k: None, enforce=lambda _s, _p, *a, **k: _p, enforce_request=lambda _s, _p, *a, **k: _p, enforce_reply=lambda _s, _p, *a, **k: _p, _lineaje_seen=set()))
+        k = "missing" if p is None else (str(p), type(e).__name__)
+        if k not in z._lineaje_seen:
+            z._lineaje_seen.add(k); g = logging.getLogger("lineaje.guardrail"); g.log(30 if p is None else 40, w)
+            if g.hasHandlers(): sys.stderr.write(w + "\n")
+        return z
+__import__("sys").__dict__.setdefault("_lineaje_gr_load_v1", _lineaje_gr_load)
+del _lineaje_gr_load
+def _lineaje_load_gr_client():
+    """Lineaje-added: this file's gr_stub_client.py (the loader _lineaje_gr_load registered)."""
+    return __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+if __import__("os").environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+
 import operator
 import time
 from pathlib import Path
@@ -91,6 +128,16 @@ def _status(stage: str, message: str) -> None:
 def _call(layer: str, tool, args: dict, note=None):
     """Invoke a layer tool and return (output, trace entry)."""
     t0 = time.perf_counter()
+    # LINEAJE: runtime guardrail checks `args` as it flows from the agent to a tool, after the tool returns (in _call).
+    #   Detected: this statement moves data from the agent to a tool with no runtime policy check (detection confidence: medium).
+    #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `args` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:29ba6c5a4c0a63eb3388bcce11e9508a4727fdac73b4857e8307867507666328'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:29ba6c5a4c0a63eb3388bcce11e9508a4727fdac73b4857e8307867507666328', phase='post_tool', boundary={'source': 'tool_result', 'sink': 'agent_message'}, fail_mode='ALLOW_WITH_AUDIT', source_type='agent', destination_type='tool', components={'source': {'entity_type': 'agent', 'unique_org_id': 'vdna_7x1SqbGPY9RMRu8k', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/agent/harness.py', 'line': 101, 'name': 'AgentHarness'}, 'invocation': {'file': 'rag/agent/harness.py', 'line': 94, 'function': '_call'}, 'file': 'rag/agent/harness.py', 'line': 94, 'function': '_call', 'agent_name': '_call', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        args = _gr_client.enforce(_gr_site, args, content_type='application/json', variable_name='args', source_file=__file__, before_line=94)
+    except _gr_client.GuardrailUnavailableError:
+        pass
     out = tool.invoke(args)
     entry = {"layer": layer, "tool": tool.name, "ms": round((time.perf_counter() - t0) * 1000)}
     if note:
@@ -123,6 +170,19 @@ class AgentHarness:
         state = {"chat_id": chat_id, "user_id": self.user_id, "raw_question": question,
                  "from_followup": from_followup, "trace": [], "trace_id": str(cfg["run_id"])}
         final = None
+        # LINEAJE: runtime guardrail checks `state` as it flows from the agent to the LLM, before it is sent to the model (in AgentHarness.events).
+        #   Detected: this statement moves data from the agent to the LLM with no runtime policy check (detection confidence: medium).
+        #   Decision: the Guardrail evaluates AI_AGENT_ACTIVITY_LOG, AI_APP_SEC_006, AI_APP_SEC_028, AI_APP_SEC_070 (+2 more); sensitive values in `state` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:4e3fccee2064f20a821263fa5d30ad7484504baf3764a05cfe3da0642f4e1450'
+        _gr_client = _lineaje_load_gr_client()
+        _lineaje_interaction_id = _gr_client.new_interaction_id()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:4e3fccee2064f20a821263fa5d30ad7484504baf3764a05cfe3da0642f4e1450', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, fail_mode='BLOCK', source_type='agent', destination_type='llm', components={'source': {'entity_type': 'agent', 'file_path': 'rag/agent/harness.py', 'line': 101, 'name': 'AgentHarness', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'unique_org_id': 'vdna_7x1SqbGPY9RMRu8k'}, 'invocation': {'file': 'rag/agent/harness.py', 'function': 'AgentHarness.events', 'line': 126}, 'destination': {'entity_type': 'llm', 'name': 'llama3.2:3b', 'provider': 'meta', 'version': ''}, 'file': 'rag/agent/harness.py', 'line': 126, 'function': 'events', 'agent_name': 'AgentHarness', 'agent_name_source': 'inferred_from_class', 'boundary_id': 'bnd:c5de792d851bf8f9'}, interaction_id=_lineaje_interaction_id)
+        try:
+            state = _gr_client.enforce(_gr_site, state, content_type='application/json', variable_name='state', source_file=__file__, before_line=126)
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            raise
         for mode, chunk in self.graph.stream(state, cfg, stream_mode=["custom", "values"]):
             if mode == "custom":
                 yield chunk
@@ -172,6 +232,18 @@ class AgentHarness:
             out.update(closed=True, step=session["steps"], blocked=True, followups=[],
                        result={"question": s["raw_question"], "context": [], "answer": msg,
                                "origin": None, "limit_reached": True})
+        # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in AgentHarness._memory).
+        #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+        #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:27d174a0735d9cb9ee1271df49b94cb50078a30b047137953eb26609dad0903a'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:27d174a0735d9cb9ee1271df49b94cb50078a30b047137953eb26609dad0903a', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'source': {'entity_type': 'agent', 'unique_org_id': 'vdna_7x1SqbGPY9RMRu8k', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/agent/harness.py', 'line': 101, 'name': 'AgentHarness'}, 'invocation': {'file': 'rag/agent/harness.py', 'line': 175, 'function': 'AgentHarness._memory'}, 'file': 'rag/agent/harness.py', 'line': 175, 'function': '_memory', 'agent_name': 'AgentHarness', 'agent_name_source': 'inferred_from_class', 'not_on_graph': True})
+        try:
+            out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return out
 
     def _blocked(self, question: str, message: str, intent, guard, pii) -> dict:
@@ -340,6 +412,18 @@ class AgentHarness:
             "from_followup": s.get("from_followup", False),
             "trace_id": s.get("trace_id"),
         })
+        # LINEAJE: runtime guardrail checks `r` as it flows from the agent to the user interface, before it leaves the application (in AgentHarness._result).
+        #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+        #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `r` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:0dd6d983e22ad589f26758b0dd7dc40fee21c9e6898c88e9e56512e4c000ab39'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:0dd6d983e22ad589f26758b0dd7dc40fee21c9e6898c88e9e56512e4c000ab39', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'source': {'entity_type': 'agent', 'unique_org_id': 'vdna_7x1SqbGPY9RMRu8k', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/agent/harness.py', 'line': 101, 'name': 'AgentHarness'}, 'invocation': {'file': 'rag/agent/harness.py', 'line': 343, 'function': 'AgentHarness._result'}, 'file': 'rag/agent/harness.py', 'line': 343, 'function': '_result', 'agent_name': 'AgentHarness', 'agent_name_source': 'inferred_from_class', 'not_on_graph': True})
+        try:
+            r = _gr_client.enforce(_gr_site, r, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return r
 
 
