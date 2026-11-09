@@ -22,6 +22,43 @@ Survivors are ranked by answerability + 0.5 * relevance + 0.5 * similarity to
 the interest profile;
 model-written questions come first and graph templates only fill remaining slots.
 """
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_gr_load(_f):
+    """Lineaje-added: load gr_stub_client.py beside _f or in one of its 7 parent folders. Missing or broken:
+    a pass-through client and ONE warning per process (GR_REQUIRE_CLIENT=1: ImportError instead)."""
+    import sys, os, logging, importlib.util as u, pathlib
+    n = "_lineaje_gr_stub_client"
+    if n in sys.modules: return sys.modules[n]
+    h = pathlib.Path(_f or ".").resolve().parent
+    d = [h, *h.parents][:8]
+    p = next((x / "gr_stub_client.py" for x in d if (x / "gr_stub_client.py").is_file()), None)
+    try:
+        s = u.spec_from_file_location(n, p) if p else None
+        if s is None: raise FileNotFoundError("gr_stub_client.py")
+        m = sys.modules[n] = u.module_from_spec(s); s.loader.exec_module(m); return m
+    except Exception as e:
+        sys.modules.pop(n, None)
+        w = ("gr_stub_client.py not found for %s (searched: %s)" % (_f or "<no __file__>", ", ".join(map(str, d)))
+             if p is None else "%s failed to load (%s%s)" % (p, type(e).__name__,
+                                                          " line %s" % e.lineno if isinstance(e, SyntaxError) else ""))
+        w = ("Lineaje guardrail NOT active: " + w + ". Calls pass through unchecked; set GR_REQUIRE_CLIENT=1 to fail "
+             "instead. Each deploy unit needs gr_stub_client.py beside its code and GR_SERVICE_URL plus credentials as "
+             "environment variables.")
+        if os.environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": raise ImportError(w) from (None if p is None else e)
+        z = sys.__dict__.setdefault("_lineaje_gr_null", __import__('types').SimpleNamespace(STUB_API=999999, GuardrailUnavailableError=type('GuardrailUnavailableError', (PermissionError,), {}), SiteDescriptor=lambda *a, **k: None, new_interaction_id=lambda *a, **k: None, enforce=lambda _s, _p, *a, **k: _p, enforce_request=lambda _s, _p, *a, **k: _p, enforce_reply=lambda _s, _p, *a, **k: _p, _lineaje_seen=set()))
+        k = "missing" if p is None else (str(p), type(e).__name__)
+        if k not in z._lineaje_seen:
+            z._lineaje_seen.add(k); g = logging.getLogger("lineaje.guardrail"); g.log(30 if p is None else 40, w)
+            if g.hasHandlers(): sys.stderr.write(w + "\n")
+        return z
+__import__("sys").__dict__.setdefault("_lineaje_gr_load_v1", _lineaje_gr_load)
+del _lineaje_gr_load
+def _lineaje_load_gr_client():
+    """Lineaje-added: this file's gr_stub_client.py (the loader _lineaje_gr_load registered)."""
+    return __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+if __import__("os").environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+
 import re
 from functools import lru_cache
 
@@ -115,7 +152,31 @@ def graph_candidates(question: str, interests: list[dict], limit: int = 6) -> li
             if q not in out and not _same_thing(a, b):
                 out.append(q)
             if len(out) >= limit:
+                # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in graph_candidates).
+                #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+                #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+                #   Do not remove without review. site_id='site:sha256:5788d6696a61ac65e0f2ddf88d37b3b277e239d2585f935e348ed7e9aafed661'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:5788d6696a61ac65e0f2ddf88d37b3b277e239d2585f935e348ed7e9aafed661', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/agent/followups.py', 'line': 118, 'function': 'graph_candidates'}, 'file': 'rag/agent/followups.py', 'line': 118, 'function': 'graph_candidates', 'agent_name': 'graph_candidates', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+                try:
+                    out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+                except _gr_client.GuardrailUnavailableError:
+                    pass
+                except PermissionError:
+                    pass
                 return out
+    # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in graph_candidates).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:bb5056b089e01ac0e1c458c6247cb25c9883f84a70d07cd7e54bc8f03b7b553a'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:bb5056b089e01ac0e1c458c6247cb25c9883f84a70d07cd7e54bc8f03b7b553a', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/agent/followups.py', 'line': 119, 'function': 'graph_candidates'}, 'file': 'rag/agent/followups.py', 'line': 119, 'function': 'graph_candidates', 'agent_name': 'graph_candidates', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return out
 
 
@@ -128,8 +189,30 @@ def _answerability(questions: list[str]) -> list[float]:
     scores = []
     for q in questions:
         hits = store.similarity_search_with_score(q, k=4)
+        # LINEAJE: runtime guardrail checks `hits` as it flows from a vector store to the agent, after the tool returns (in _answerability).
+        #   Detected: this statement moves data from a vector store to the agent with no runtime policy check (detection confidence: high).
+        #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `hits` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:987bf8cfbb8db911e3d0ddbdce97c22e38f0bb7006e5b1d1fc4090e989b9ecab'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:987bf8cfbb8db911e3d0ddbdce97c22e38f0bb7006e5b1d1fc4090e989b9ecab', phase='post_tool', boundary={'source': 'vector_store', 'sink': 'agent_context'}, fail_mode='ALLOW_WITH_AUDIT', source_type='vector_store', destination_type='agent', components={'destination': {'entity_type': 'rag', 'unique_org_id': 'vdna_7x1SqbGPY9RMRu8k', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/agent/followups.py', 'line': 124, 'name': 'get_vectorstore'}, 'invocation': {'file': 'rag/agent/followups.py', 'line': 130, 'function': '_answerability'}, 'file': 'rag/agent/followups.py', 'line': 130, 'function': '_answerability', 'agent_name': '_answerability', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+        try:
+            hits = _gr_client.enforce(_gr_site, hits, content_type='application/json', variable_name='hits', source_file=__file__, before_line=130)
+        except _gr_client.GuardrailUnavailableError:
+            pass
         live = [distance_to_cosine(store, dist) for d, dist in hits if d.id and is_active(d.id)]
         scores.append(max(live, default=0.0))
+    # LINEAJE: runtime guardrail checks `scores` as it flows from the agent to the user interface, before it leaves the application (in _answerability).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `scores` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:f2a1c28fd9b5e24d1715009e623d1107ffcfdc574e584f6d2ff2593659abec3a'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:f2a1c28fd9b5e24d1715009e623d1107ffcfdc574e584f6d2ff2593659abec3a', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/agent/followups.py', 'line': 133, 'function': '_answerability'}, 'file': 'rag/agent/followups.py', 'line': 133, 'function': '_answerability', 'agent_name': '_answerability', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        scores = _gr_client.enforce(_gr_site, scores, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return scores
 
 
@@ -160,10 +243,43 @@ def suggest(question: str, answer: str, docs: list[Document], interests: list[di
         return []
 
     emb = get_embeddings()
-    cv = np.asarray(emb.embed_documents([q for q, _ in cands]))
-    av = np.asarray(emb.embed_documents(asked + [question]))
+    _lineaje_payload = [q for q, _ in cands]
+    # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the RAG pipeline to embedding model, before it is sent to the model (in suggest).
+    #   Detected: this statement moves data from the RAG pipeline to embedding model with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `_lineaje_payload` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:6fcbba3957725028a9b550ea0b3d87de8a09d2721af1ab3d6c1c87280c6d5240'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:6fcbba3957725028a9b550ea0b3d87de8a09d2721af1ab3d6c1c87280c6d5240', phase='pre_model', boundary={'source': 'rag_pipeline', 'sink': 'embedding_model'}, fail_mode='ALLOW_WITH_AUDIT', source_type='rag_pipeline', destination_type='embedding_model', components={'invocation': {'file': 'rag/agent/followups.py', 'line': 163, 'function': 'suggest'}, 'file': 'rag/agent/followups.py', 'line': 163, 'function': 'suggest', 'agent_name': 'suggest', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json', variable_name='_lineaje_payload', source_file=__file__, before_line=163)
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    cv = np.asarray(emb.embed_documents(_lineaje_payload))
+    _lineaje_payload = asked + [question]
+    # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the RAG pipeline to embedding model, before it is sent to the model (in suggest).
+    #   Detected: this statement moves data from the RAG pipeline to embedding model with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `_lineaje_payload` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:1181870f5084113ab6d602620e1f70f332f7cc01bf6b0297683e456c357d1012'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:1181870f5084113ab6d602620e1f70f332f7cc01bf6b0297683e456c357d1012', phase='pre_model', boundary={'source': 'rag_pipeline', 'sink': 'embedding_model'}, fail_mode='ALLOW_WITH_AUDIT', source_type='rag_pipeline', destination_type='embedding_model', components={'invocation': {'file': 'rag/agent/followups.py', 'line': 164, 'function': 'suggest'}, 'file': 'rag/agent/followups.py', 'line': 164, 'function': 'suggest', 'agent_name': 'suggest', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json', variable_name='_lineaje_payload', source_file=__file__, before_line=164)
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    av = np.asarray(emb.embed_documents(_lineaje_payload))
     novel = (cv @ av.T).max(axis=1) < NEAR_DUPLICATE
-    turn = np.asarray(emb.embed_documents([question, answer[:500]]))
+    _lineaje_payload = [question, answer[:500]]
+    # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the RAG pipeline to embedding model, before it is sent to the model (in suggest).
+    #   Detected: this statement moves data from the RAG pipeline to embedding model with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `_lineaje_payload` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:4e50a0ade97048acaed89582674d7e11dc9af2deec823c1ed4ac30b40dec5dfc'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:4e50a0ade97048acaed89582674d7e11dc9af2deec823c1ed4ac30b40dec5dfc', phase='pre_model', boundary={'source': 'rag_pipeline', 'sink': 'embedding_model'}, fail_mode='ALLOW_WITH_AUDIT', source_type='rag_pipeline', destination_type='embedding_model', components={'invocation': {'file': 'rag/agent/followups.py', 'line': 166, 'function': 'suggest'}, 'file': 'rag/agent/followups.py', 'line': 166, 'function': 'suggest', 'agent_name': 'suggest', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json', variable_name='_lineaje_payload', source_file=__file__, before_line=166)
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    turn = np.asarray(emb.embed_documents(_lineaje_payload))
     relevance = (cv @ turn.T).max(axis=1)
     p = profile_vector(interests)
     interest = cv @ p if p is not None else np.zeros(len(cands))
