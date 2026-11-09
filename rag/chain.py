@@ -1,4 +1,41 @@
 """Retrieval-augmented generation chain (LCEL) with source citations."""
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_gr_load(_f):
+    """Lineaje-added: load gr_stub_client.py beside _f or in one of its 7 parent folders. Missing or broken:
+    a pass-through client and ONE warning per process (GR_REQUIRE_CLIENT=1: ImportError instead)."""
+    import sys, os, logging, importlib.util as u, pathlib
+    n = "_lineaje_gr_stub_client"
+    if n in sys.modules: return sys.modules[n]
+    h = pathlib.Path(_f or ".").resolve().parent
+    d = [h, *h.parents][:8]
+    p = next((x / "gr_stub_client.py" for x in d if (x / "gr_stub_client.py").is_file()), None)
+    try:
+        s = u.spec_from_file_location(n, p) if p else None
+        if s is None: raise FileNotFoundError("gr_stub_client.py")
+        m = sys.modules[n] = u.module_from_spec(s); s.loader.exec_module(m); return m
+    except Exception as e:
+        sys.modules.pop(n, None)
+        w = ("gr_stub_client.py not found for %s (searched: %s)" % (_f or "<no __file__>", ", ".join(map(str, d)))
+             if p is None else "%s failed to load (%s%s)" % (p, type(e).__name__,
+                                                          " line %s" % e.lineno if isinstance(e, SyntaxError) else ""))
+        w = ("Lineaje guardrail NOT active: " + w + ". Calls pass through unchecked; set GR_REQUIRE_CLIENT=1 to fail "
+             "instead. Each deploy unit needs gr_stub_client.py beside its code and GR_SERVICE_URL plus credentials as "
+             "environment variables.")
+        if os.environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": raise ImportError(w) from (None if p is None else e)
+        z = sys.__dict__.setdefault("_lineaje_gr_null", __import__('types').SimpleNamespace(STUB_API=999999, GuardrailUnavailableError=type('GuardrailUnavailableError', (PermissionError,), {}), SiteDescriptor=lambda *a, **k: None, new_interaction_id=lambda *a, **k: None, enforce=lambda _s, _p, *a, **k: _p, enforce_request=lambda _s, _p, *a, **k: _p, enforce_reply=lambda _s, _p, *a, **k: _p, _lineaje_seen=set()))
+        k = "missing" if p is None else (str(p), type(e).__name__)
+        if k not in z._lineaje_seen:
+            z._lineaje_seen.add(k); g = logging.getLogger("lineaje.guardrail"); g.log(30 if p is None else 40, w)
+            if g.hasHandlers(): sys.stderr.write(w + "\n")
+        return z
+__import__("sys").__dict__.setdefault("_lineaje_gr_load_v1", _lineaje_gr_load)
+del _lineaje_gr_load
+def _lineaje_load_gr_client():
+    """Lineaje-added: this file's gr_stub_client.py (the loader _lineaje_gr_load registered)."""
+    return __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+if __import__("os").environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+
 import re
 from functools import lru_cache
 
@@ -67,6 +104,19 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
     if config.LLM_PROVIDER == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
+        # LINEAJE: runtime guardrail checks the model this client is built with as it flows from the agent to the LLM, before it is sent to the model (in get_llm).
+        #   Detected: this statement moves data from the agent to the LLM with no runtime policy check (detection confidence: medium).
+        #   Decision: the Guardrail evaluates AI_AGENT_ACTIVITY_LOG, AI_APP_SEC_006, AI_APP_SEC_028, AI_APP_SEC_070 (+1 more); a model that is not approved is refused before the client is built (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:69f264040449585c15e72388ad0980eff717f11ae4958dd35d72ff40b665d7df'
+        _lineaje_model_evidence = {'model': config.LLM_MODEL, 'client': 'ChatAnthropic', 'provider': 'langchain_anthropic', 'model_source': 'call_kwarg', 'project': 'luminusrag'}
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:69f264040449585c15e72388ad0980eff717f11ae4958dd35d72ff40b665d7df', phase='pre_model', boundary={'source': 'agent_config', 'sink': 'model'}, fail_mode='BLOCK', source_type='agent', destination_type='llm', components={'source': {'entity_type': 'agent', 'unique_org_id': 'vdna_m2lqBnC0G3jDp5iK', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/chain.py', 'line': 130, 'name': 'GuardedPipeline'}, 'destination': {'entity_type': 'llm', 'name': 'claude-sonnet-4-5', 'version': '', 'provider': 'anthropic'}, 'invocation': {'file': 'rag/chain.py', 'function': 'get_llm', 'line': 70}, 'file': 'rag/chain.py', 'line': 70, 'function': 'get_llm', 'agent_name': 'get_llm', 'agent_name_source': 'inferred_from_function', 'boundary_id': 'bnd:57d12ab5b01862bb'})
+        try:
+            _lineaje_model_evidence = _gr_client.enforce(_gr_site, _lineaje_model_evidence, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            raise
         return ChatAnthropic(model=config.LLM_MODEL, temperature=temperature)
 
     from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline
@@ -115,8 +165,29 @@ def _best_score(question: str, docs: list[Document]) -> float:
     from .store import get_embeddings
 
     emb = get_embeddings()
+    # LINEAJE: runtime guardrail checks `question` as it flows from the RAG pipeline to embedding model, before it is sent to the model (in _best_score).
+    #   Detected: this statement moves data from the RAG pipeline to embedding model with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `question` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:dee59fe83ea31c9e666e6663ac7bb5c87bb106b4ba52ab161b053582fc7a20d8'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:dee59fe83ea31c9e666e6663ac7bb5c87bb106b4ba52ab161b053582fc7a20d8', phase='pre_model', boundary={'source': 'rag_pipeline', 'sink': 'embedding_model'}, fail_mode='ALLOW_WITH_AUDIT', source_type='rag_pipeline', destination_type='embedding_model', components={'source': {'entity_type': 'agent', 'unique_org_id': 'vdna_m2lqBnC0G3jDp5iK', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/chain.py', 'line': 130, 'name': 'GuardedPipeline'}, 'invocation': {'file': 'rag/chain.py', 'line': 118, 'function': '_best_score'}, 'file': 'rag/chain.py', 'line': 118, 'function': '_best_score', 'agent_name': '_best_score', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        question = _gr_client.enforce(_gr_site, question, content_type='application/json', variable_name='question', source_file=__file__, before_line=118)
+    except _gr_client.GuardrailUnavailableError:
+        pass
     q = np.asarray(emb.embed_query(question))
-    d = np.asarray(emb.embed_documents([doc.page_content for doc in docs]))
+    _lineaje_payload = [doc.page_content for doc in docs]
+    # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the RAG pipeline to embedding model, before it is sent to the model (in _best_score).
+    #   Detected: this statement moves data from the RAG pipeline to embedding model with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `_lineaje_payload` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:2adcbae36a6eded269f28ca7cb7120de9130878440fbcb1b7e68f6b594988fa4'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:2adcbae36a6eded269f28ca7cb7120de9130878440fbcb1b7e68f6b594988fa4', phase='pre_model', boundary={'source': 'rag_pipeline', 'sink': 'embedding_model'}, fail_mode='ALLOW_WITH_AUDIT', source_type='rag_pipeline', destination_type='embedding_model', components={'source': {'entity_type': 'agent', 'unique_org_id': 'vdna_m2lqBnC0G3jDp5iK', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/chain.py', 'line': 130, 'name': 'GuardedPipeline'}, 'invocation': {'file': 'rag/chain.py', 'line': 119, 'function': '_best_score'}, 'file': 'rag/chain.py', 'line': 119, 'function': '_best_score', 'agent_name': '_best_score', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json', variable_name='_lineaje_payload', source_file=__file__, before_line=119)
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    d = np.asarray(emb.embed_documents(_lineaje_payload))
     return float((d @ q).max())
 
 
@@ -190,7 +261,23 @@ class GuardedPipeline:
 
         urls = {d.metadata.get("source", "") for d in docs if d.metadata.get("origin") == "web"}
         buffer, parts, actions, first = "", [], set(), True
-        for chunk in self.answer_chain.stream({"context": docs, "question": question}):
+        _lineaje_arg = {"context": docs, "question": question}
+        # LINEAJE: runtime guardrail checks `_lineaje_arg` as it flows from the agent to the LLM, before it is sent to the model (in GuardedPipeline._stream_answer).
+        #   Detected: this statement moves data from the agent to the LLM with no runtime policy check (detection confidence: medium).
+        #   Decision: the Guardrail evaluates AI_AGENT_ACTIVITY_LOG, AI_APP_SEC_006, AI_APP_SEC_028, AI_APP_SEC_070 (+2 more); sensitive values in `_lineaje_arg` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:22cf3b6e2d4201bfa8cea34b7a7ff4d85040de4ba44c917f0c4f24659748c7e8'
+        _lineaje__lineaje_arg_evidence = {'_lineaje_arg': _lineaje_arg, **(getattr(_lineaje_load_gr_client(), 'receiver_model', None) or (lambda o, p, f, s: {'model': f, 'model_source': s}))(self, ('answer_chain',), getattr(_lineaje_load_gr_client(), 'current_model', lambda _f: '')(__file__), 'guess')}
+        _gr_client = _lineaje_load_gr_client()
+        _lineaje_interaction_id = _gr_client.new_interaction_id()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:22cf3b6e2d4201bfa8cea34b7a7ff4d85040de4ba44c917f0c4f24659748c7e8', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, fail_mode='BLOCK', source_type='agent', destination_type='llm', components={'source': {'entity_type': 'agent', 'unique_org_id': 'vdna_m2lqBnC0G3jDp5iK', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/chain.py', 'line': 130, 'name': 'GuardedPipeline'}, 'destination': {'entity_type': 'llm', 'name': 'claude-sonnet-4-5', 'version': '', 'provider': 'anthropic'}, 'invocation': {'file': 'rag/chain.py', 'function': 'GuardedPipeline._stream_answer', 'line': 193}, 'file': 'rag/chain.py', 'line': 193, 'function': '_stream_answer', 'agent_name': 'GuardedPipeline', 'agent_name_source': 'inferred_from_class', 'boundary_id': 'bnd:560ec7a6edf9a3f9'}, interaction_id=_lineaje_interaction_id)
+        try:
+            _lineaje__lineaje_arg_evidence = _gr_client.enforce(_gr_site, _lineaje__lineaje_arg_evidence, content_type='application/json')
+            _lineaje_arg = _lineaje__lineaje_arg_evidence.get('_lineaje_arg', _lineaje_arg) if isinstance(_lineaje__lineaje_arg_evidence, dict) else _lineaje_arg
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            raise
+        for chunk in self.answer_chain.stream(_lineaje_arg):
             buffer += chunk
             cut = None
             for m in _SEGMENT_END.finditer(buffer):
@@ -279,6 +366,16 @@ class GuardedPipeline:
 
         yield {"type": "status", "stage": "retrieve", "message": "Searching your documents…"}
         docs = self.retriever.invoke(question)
+        # LINEAJE: runtime guardrail checks `docs` as it flows from a vector store to the agent, after the tool returns (in GuardedPipeline._events).
+        #   Detected: this statement moves data from a vector store to the agent with no runtime policy check (detection confidence: medium).
+        #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `docs` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:7c1c3cf7b58aa49e800db9118bc3e384cd7bcef6db9e537f3a37125ef2e24e10'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:7c1c3cf7b58aa49e800db9118bc3e384cd7bcef6db9e537f3a37125ef2e24e10', phase='post_tool', boundary={'source': 'vector_store', 'sink': 'agent_context'}, fail_mode='ALLOW_WITH_AUDIT', source_type='vector_store', destination_type='agent', components={'source': {'entity_type': 'agent', 'unique_org_id': 'vdna_m2lqBnC0G3jDp5iK', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/chain.py', 'line': 130, 'name': 'GuardedPipeline'}, 'destination': {'entity_type': 'rag', 'unique_org_id': 'vdna_m2lqBnC0G3jDp5iK', 'repository_uri': 'https://github.com/radhika-singh-10/luminusrag', 'file_path': 'rag/eval/security_eval.py', 'line': 156, 'name': 'get_retriever'}, 'invocation': {'file': 'rag/chain.py', 'line': 281, 'function': 'GuardedPipeline._events'}, 'file': 'rag/chain.py', 'line': 281, 'function': '_events', 'agent_name': 'GuardedPipeline', 'agent_name_source': 'inferred_from_class', 'not_on_graph': True})
+        try:
+            docs = _gr_client.enforce(_gr_site, docs, content_type='application/json', variable_name='docs', source_file=__file__, before_line=281)
+        except _gr_client.GuardrailUnavailableError:
+            pass
         result = {"intent": intent, "pii_redacted": pii, "guard": guard,
                   "standalone_question": standalone}
         yield from self.answer_events(docs, question, result)
