@@ -1,0 +1,15 @@
+{
+  "defaults": {"n": 3, "ks": [1, 3], "temperature": 0.7, "LLM_JUDGE": false, "RETRIEVAL_MODE": "hybrid"},
+  "variants": [
+    {"name": "main-k2", "top_k": 2},
+    {"name": "main-k2-rerank", "top_k": 2, "RERANK": true},
+    {"name": "main-k3", "top_k": 3},
+    {"name": "main-k3-rerank", "top_k": 3, "RERANK": true},
+    {"name": "main-k8", "top_k": 8},
+    {"name": "main-k8-rerank", "top_k": 8, "RERANK": true},
+    {"name": "graphq-k3", "top_k": 3, "dataset": "eval/graph_dataset.jsonl"},
+    {"name": "graphq-k3-rerank", "top_k": 3, "RERANK": true, "dataset": "eval/graph_dataset.jsonl"},
+    {"name": "graphq-k8", "top_k": 8, "dataset": "eval/graph_dataset.jsonl"},
+    {"name": "graphq-k8-rerank", "top_k": 8, "RERANK": true, "dataset": "eval/graph_dataset.jsonl"}
+  ]
+}

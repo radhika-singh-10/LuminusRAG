@@ -34,6 +34,10 @@ The RAG eval calls retrieval and generation directly, so it measures the pipelin
   4 chunks usually include the answer plus unrelated text.
 - **The intent gate scored 49/49**, including action requests in Spanish,
   French and Hindi.
+- **The reranker helps when the context is small** (2026-11-08): at TOP_K 2 it lifts
+  accuracy from 0.67 to 0.83 on the main set and from 0.66 to 0.83 on a harder 48-question
+  "messy" corpus, matching unreranked TOP_K 8 with a quarter of the context. At TOP_K 8 recall
+  is already perfect, so it adds nothing (see "Reranker vs TOP_K").
 
 ## Generation
 
@@ -255,11 +259,13 @@ Run on 2026-11-07 with hybrid retrieval, 3 sampled answers per question, and the
 - **History-aware follow-ups help the most:** rewriting "What is its main cost?" into "What is the main
   cost of HNSW?" more than doubles accuracy (0.40 to 0.83) and lifts retrieval recall from 0.70 to 1.00.
   It is on by default (`HISTORY_AWARE=true`).
-- **The reranker ranks better but does not answer better:** MRR rises from 0.79 to 0.97, so the
-  best chunk is almost always first, but accuracy is flat on ordinary questions and drops on
-  relational ones (0.77 to 0.63) because keeping only the top 4 of 20 candidates drops the second
-  chunk a multi-hop answer needs. It also adds about 35% latency. It stays off by default
-  (`RERANK=false`).
+- **The reranker ranks better but did not answer better in this run:** MRR rises from 0.79 to
+  0.97, so the best chunk is almost always first, but accuracy is flat on ordinary questions.
+  That is expected: retrieval recall was already 1.000 without it, so the answer chunk was already
+  in the context and the reranker only reordered it. The drop on relational questions (0.77 to
+  0.63) was **not** caused by losing evidence (recall stayed 1.000) and did not reproduce in the
+  follow-up sweep. **Corrected on 2026-11-08:** see "Reranker vs TOP_K, on a messy corpus" below,
+  where the reranker clearly helps once TOP_K is small or the corpus is harder.
 - **The LLM judge is a usable second opinion on the main set:** it agrees with the rule-based grade on
   87-92% of answers (Cohen's kappa 0.65-0.80, substantial). On the 10-question sets agreement is
   much lower (kappa about 0.3 or below) and the judge is usually more lenient than the rules, which
@@ -269,6 +275,63 @@ Run on 2026-11-07 with hybrid retrieval, 3 sampled answers per question, and the
   always scored 1, and it accepted "I don't know" as correct; a plain two-line VERDICT/SCORE reply
   scored 8/8 on a labeled sanity set, and refusals are graded by rule.
 - **Caveats:** 10-21 questions x 3 samples, so differences of a few points are noise.
+
+## Reranker vs TOP_K, on a messy corpus (`bench --config eval/experiments_rerank.json` and `eval/experiments_messy.json`)
+
+Run on 2026-11-08 to test whether the reranker was ruled out too early. The earlier run kept 8
+chunks and had perfect recall without reranking, so reordering could not change what the model
+saw. This run varies TOP_K (2, 3, 8) with the reranker on and off (fetch 20, cross-encoder
+`ms-marco-MiniLM-L-6-v2`), on three question sets. Hybrid retrieval, 3 sampled answers per
+question, temperature 0.7, no LLM judge.
+
+The **messy corpus** (`eval/messy/build_corpus.py`, see [testing.md](testing.md)) is a synthetic
+ML-platform wiki with 136 chunks (3x `data/`), built to be hard for a bi-encoder: production,
+staging and retired configs that differ only in their numbers, benchmark reruns, templated
+postmortems and changelog entries, meeting notes whose decisions are later reversed, boilerplate
+and OCR-style line breaks. It has 48 questions (4 unanswerable) and its own index.
+
+| Questions | TOP_K | Reranker | Accuracy | pass^3 | Retrieval R | MRR | Faithfulness | Hallucination | Abstention F1 | e2e p50 | TTFT p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Original 21 | 2 | off | 0.667 | 0.571 | 0.765 | 0.735 | 0.819 | 0.200 | 0.870 | 320 ms | 83 ms |
+| Original 21 | 2 | **on** | **0.825** | **0.762** | **1.000** | 1.000 | 0.911 | 0.167 | 0.800 | 404 ms | 85 ms |
+| Original 21 | 3 | off | 0.619 | 0.381 | 0.824 | 0.755 | 0.878 | 0.211 | 0.700 | 324 ms | 98 ms |
+| Original 21 | 3 | **on** | **0.794** | **0.667** | **1.000** | 1.000 | 0.900 | 0.210 | 0.800 | 383 ms | 96 ms |
+| Original 21 | 8 | off | 0.810 | 0.667 | 1.000 | 0.782 | 0.929 | 0.103 | 0.909 | 443 ms | 174 ms |
+| Original 21 | 8 | on | 0.730 | 0.667 | 1.000 | 1.000 | 0.830 | 0.214 | 0.857 | 450 ms | 175 ms |
+| Relational 10 | 3 | off | 0.867 | 0.700 | 1.000 | 0.900 | 0.527 | 0.704 | – | 533 ms | 124 ms |
+| Relational 10 | 3 | on | 0.800 | 0.700 | 1.000 | 1.000 | 0.582 | 0.556 | – | 681 ms | 120 ms |
+| Relational 10 | 8 | off | 0.800 | 0.600 | 1.000 | 0.900 | 0.565 | 0.633 | – | 670 ms | 206 ms |
+| Relational 10 | 8 | on | 0.800 | 0.700 | 1.000 | 1.000 | 0.629 | 0.536 | – | 566 ms | 223 ms |
+| Messy 48 | 2 | off | 0.660 | 0.583 | 0.795 | 0.650 | 0.787 | 0.273 | 0.538 | 267 ms | 110 ms |
+| Messy 48 | 2 | **on** | **0.826** | **0.792** | **0.977** | 0.966 | 0.913 | 0.148 | 0.737 | 291 ms | 93 ms |
+| Messy 48 | 3 | off | 0.764 | 0.688 | 0.932 | 0.692 | 0.837 | 0.274 | 0.435 | 302 ms | 125 ms |
+| Messy 48 | 3 | on | 0.799 | 0.771 | 1.000 | 0.973 | 0.913 | 0.227 | 0.500 | 314 ms | 116 ms |
+| Messy 48 | 8 | off | 0.826 | 0.771 | 1.000 | 0.702 | 0.934 | 0.138 | 0.667 | 378 ms | 210 ms |
+| Messy 48 | 8 | on | 0.778 | 0.729 | 1.000 | 0.973 | 0.923 | 0.182 | 0.588 | 378 ms | 192 ms |
+
+- **The reranker pays off when the context is small.** At TOP_K 2 the bi-encoder misses the
+  evidence chunk for some questions (recall 0.77 on the main set, 0.80 on the messy one); the
+  reranker, choosing 2 of 20 candidates, recovers it (recall 1.00 and 0.98). Accuracy rises from
+  0.67 to 0.83 (main) and 0.66 to 0.83 (messy), pass^3 rises by 0.19-0.21, and hallucination falls
+  on the messy set (0.27 to 0.15). The same pattern holds at TOP_K 3, more weakly.
+- **Reranked TOP_K 2 matches unreranked TOP_K 8 with a quarter of the context:** 0.825 vs 0.810
+  (main) and 0.826 vs 0.826 (messy), with about half the time to first token (85 vs 174 ms, 93 vs
+  210 ms), since the model reads 2 chunks instead of 8. The reranker itself adds 0-85 ms at p50.
+- **At TOP_K 8 it does not help**, because recall is already 1.00 without it: it only reorders
+  chunks the model already reads. Accuracy was a little lower with it on (main 0.81 vs 0.73,
+  messy 0.83 vs 0.78); with 21 and 48 questions x 3 samples that is within run-to-run noise
+  (the same main-k8 setting scored 0.714 on 2026-11-07 and 0.810 here).
+- **Relational questions:** recall is 1.00 in every setting, so the reranker has nothing to
+  recover; the 0.87 vs 0.80 gap at TOP_K 3 is one question on a 10-question set. The earlier
+  explanation (the reranker drops the second chunk a multi-hop answer needs) is not supported.
+- **Abstention is mixed:** the reranker helps on the messy set at TOP_K 2 (F1 0.54 to 0.74) and is
+  slightly worse on the main set (0.87 to 0.80), one question either way.
+- **What this means for the defaults:** `RERANK=false, TOP_K=8` remains a safe default. If the
+  context budget matters (latency, a smaller model, longer chunks), `RERANK=true` with
+  `TOP_K=2-3` gives the same accuracy with far less context. The defaults are unchanged for now.
+- **Caveats:** the messy corpus is synthetic and its near-duplicates are templated, which suits a
+  cross-encoder; a real long, messy corpus (PDFs, OCR output, wiki exports) is still the test that
+  matters. The 10-question relational set cannot resolve differences under about 0.1.
 
 ## Structure-aware chunking and TOP_K (`bench --config eval/experiments_chunking.json`)
 
@@ -621,3 +684,34 @@ blocked, 50/50 benign allowed, unchanged. The miss is the same as before
   injection is stopped before the model is called, an email in the question
   never reaches the model, an IP and email in the reply are redacted, and a
   benign question passes unchanged.
+
+## Fine-tuned Qwen2.5-1.5B on MLX (LoRA adapter)
+
+2026-11-08, `LLM_PROVIDER=mlx` with `finetune/models/qwen2.5-1.5b-instruct` +
+`finetune/adapters/qwen25-1.5b-v1` on Apple Silicon (Metal), run with
+`.venv-mlx/bin/python main.py eval -n 1 -k 1` (one greedy answer per question, original 21
+questions, default TOP_K 8, hybrid). Results in `eval/results/20261108-224208`.
+
+| Metric | Value |
+|---|---|
+| Accuracy (all / answerable) | 0.714 / 0.765 |
+| Retrieval recall / MRR | 1.000 / 0.782 |
+| Token F1 | 0.658 |
+| Citation rate / validity | 0.941 / 0.941 |
+| Faithfulness / hallucination | 0.867 / 0.211 |
+| Abstention precision / recall / F1 | 1.000 / 0.500 / 0.667 |
+| End-to-end p50 / p95 | 685 / 5,254 ms |
+| Time to first token p50 | 225 ms |
+| Generation speed | about 30 tokens/s |
+
+- **This is a smoke test, not evidence that fine-tuning helps:** the adapter was trained for 300
+  iterations on a single example (see [finetuning.md](finetuning.md)).
+- **It runs end to end on MLX** and writes valid `[n]` citations on 94% of answers, unlike the
+  Hugging Face base model (0-6% in every run of the 2026-11-08 sweep). One training example
+  cannot account for that alone, so confirm it with the base model on MLX before crediting the
+  adapter.
+- **Weak spots:** hallucination is 0.21, and the model refused only 2 of the 4 unanswerable
+  questions.
+- **Not yet compared:** the fair baseline is the same base model on MLX *without* the adapter,
+  with the same settings (`-n 1 -k 1`). Earlier runs in this file used the Hugging Face provider
+  and sampling, so they are not directly comparable.
