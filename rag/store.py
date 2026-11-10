@@ -1,4 +1,5 @@
 """Vector store access (Chroma, persisted on disk) and the shared embedding model."""
+import threading
 from functools import lru_cache
 
 from langchain_chroma import Chroma
@@ -18,13 +19,27 @@ def get_embeddings() -> HuggingFaceEmbeddings:
     )
 
 
+_stores: dict[str, Chroma] = {}
+_stores_lock = threading.Lock()
+
+
 def get_vectorstore(persist_dir=None) -> Chroma:
-    return Chroma(
-        collection_name=config.COLLECTION,
-        embedding_function=get_embeddings(),
-        persist_directory=str(persist_dir or config.PERSIST_DIR),
-        collection_metadata={"hnsw:space": "cosine"},
-    )
+    """One shared Chroma client per persist directory. Creating clients
+    concurrently (Streamlit reruns + the watcher thread) races inside
+    chromadb's SharedSystemClient cache and poisons it with a KeyError, so
+    the client is built once, under a lock, and reused."""
+    path = str(persist_dir or config.PERSIST_DIR)
+    with _stores_lock:
+        store = _stores.get(path)
+        if store is None:
+            store = Chroma(
+                collection_name=config.COLLECTION,
+                embedding_function=get_embeddings(),
+                persist_directory=path,
+                collection_metadata={"hnsw:space": "cosine"},
+            )
+            _stores[path] = store
+        return store
 
 
 class ActiveVectorRetriever(BaseRetriever):
