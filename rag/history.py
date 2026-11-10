@@ -10,6 +10,43 @@ shared database without code changes. User questions are stored PII-redacted.
 Summaries use the configured LLM (local by default) and are cached until the
 chat gets new messages.
 """
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_gr_load(_f):
+    """Lineaje-added: load gr_stub_client.py beside _f or in one of its 7 parent folders. Missing or broken:
+    a pass-through client and ONE warning per process (GR_REQUIRE_CLIENT=1: ImportError instead)."""
+    import sys, os, logging, importlib.util as u, pathlib
+    n = "_lineaje_gr_stub_client"
+    if n in sys.modules: return sys.modules[n]
+    h = pathlib.Path(_f or ".").resolve().parent
+    d = [h, *h.parents][:8]
+    p = next((x / "gr_stub_client.py" for x in d if (x / "gr_stub_client.py").is_file()), None)
+    try:
+        s = u.spec_from_file_location(n, p) if p else None
+        if s is None: raise FileNotFoundError("gr_stub_client.py")
+        m = sys.modules[n] = u.module_from_spec(s); s.loader.exec_module(m); return m
+    except Exception as e:
+        sys.modules.pop(n, None)
+        w = ("gr_stub_client.py not found for %s (searched: %s)" % (_f or "<no __file__>", ", ".join(map(str, d)))
+             if p is None else "%s failed to load (%s%s)" % (p, type(e).__name__,
+                                                          " line %s" % e.lineno if isinstance(e, SyntaxError) else ""))
+        w = ("Lineaje guardrail NOT active: " + w + ". Calls pass through unchecked; set GR_REQUIRE_CLIENT=1 to fail "
+             "instead. Each deploy unit needs gr_stub_client.py beside its code and GR_SERVICE_URL plus credentials as "
+             "environment variables.")
+        if os.environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": raise ImportError(w) from (None if p is None else e)
+        z = sys.__dict__.setdefault("_lineaje_gr_null", __import__('types').SimpleNamespace(STUB_API=999999, GuardrailUnavailableError=type('GuardrailUnavailableError', (PermissionError,), {}), SiteDescriptor=lambda *a, **k: None, new_interaction_id=lambda *a, **k: None, enforce=lambda _s, _p, *a, **k: _p, enforce_request=lambda _s, _p, *a, **k: _p, enforce_reply=lambda _s, _p, *a, **k: _p, _lineaje_seen=set()))
+        k = "missing" if p is None else (str(p), type(e).__name__)
+        if k not in z._lineaje_seen:
+            z._lineaje_seen.add(k); g = logging.getLogger("lineaje.guardrail"); g.log(30 if p is None else 40, w)
+            if g.hasHandlers(): sys.stderr.write(w + "\n")
+        return z
+__import__("sys").__dict__.setdefault("_lineaje_gr_load_v1", _lineaje_gr_load)
+del _lineaje_gr_load
+def _lineaje_load_gr_client():
+    """Lineaje-added: this file's gr_stub_client.py (the loader _lineaje_gr_load registered)."""
+    return __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+if __import__("os").environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+
 import re
 import uuid
 from datetime import datetime
@@ -72,6 +109,18 @@ def _engine() -> sa.Engine:
 def _check_id(chat_id: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{12}", chat_id):
         raise ValueError(f"Invalid chat id: {chat_id}")
+    # LINEAJE: runtime guardrail checks `chat_id` as it flows from the agent to the user interface, before it leaves the application (in _check_id).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `chat_id` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:209c1ac97c2c81e8dc57f67e43116fa7da0e6cc05e6b31bfd6de55a7cb34fba5'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:209c1ac97c2c81e8dc57f67e43116fa7da0e6cc05e6b31bfd6de55a7cb34fba5', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/history.py', 'line': 75, 'function': '_check_id'}, 'file': 'rag/history.py', 'line': 75, 'function': '_check_id', 'agent_name': '_check_id', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        chat_id = _gr_client.enforce(_gr_site, chat_id, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return chat_id
 
 
@@ -170,6 +219,18 @@ def unanswered_questions(messages: list[dict]) -> list[str]:
     for q, a in zip(messages[::2], messages[1::2]):
         if q["role"] == "user" and a["role"] == "assistant" and _not_answered(a["content"]):
             out.append(strip_redactions(q["content"]) or q["content"])
+    # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in unanswered_questions).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:7ce6a9552e5d36712462e623a79409f748753d3e40fff92bbfe66bd15a975f52'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:7ce6a9552e5d36712462e623a79409f748753d3e40fff92bbfe66bd15a975f52', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/history.py', 'line': 173, 'function': 'unanswered_questions'}, 'file': 'rag/history.py', 'line': 173, 'function': 'unanswered_questions', 'agent_name': 'unanswered_questions', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return out
 
 
@@ -186,6 +247,18 @@ def transcript(messages: list[dict]) -> str:
     text = "\n\n".join(lines)
     if len(text) > MAX_TRANSCRIPT_CHARS:  # keep the most recent part
         text = "[earlier messages omitted]\n\n" + text[-MAX_TRANSCRIPT_CHARS:]
+    # LINEAJE: runtime guardrail checks `text` as it flows from the agent to the user interface, before it leaves the application (in transcript).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `text` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:7da2e9ed5a35fc46621c0040f66f249181976fe65ad1c258a42d793881fe4f77'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:7da2e9ed5a35fc46621c0040f66f249181976fe65ad1c258a42d793881fe4f77', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/history.py', 'line': 189, 'function': 'transcript'}, 'file': 'rag/history.py', 'line': 189, 'function': 'transcript', 'agent_name': 'transcript', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        text = _gr_client.enforce(_gr_site, text, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return text
 
 
@@ -203,6 +276,18 @@ def summarize_messages(messages: list[dict], llm: BaseChatModel) -> str:
     )
     if unanswered := unanswered_questions(messages):
         summary += "\n\n**Not answered:** " + "; ".join(unanswered)
+    # LINEAJE: runtime guardrail checks `summary` as it flows from the agent to the user interface, before it leaves the application (in summarize_messages).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `summary` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:fbc64e0eda314483c093f518414b4c163f4be7ef76fa15069f66a64bbf884248'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:fbc64e0eda314483c093f518414b4c163f4be7ef76fa15069f66a64bbf884248', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/history.py', 'line': 206, 'function': 'summarize_messages'}, 'file': 'rag/history.py', 'line': 206, 'function': 'summarize_messages', 'agent_name': 'summarize_messages', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        summary = _gr_client.enforce(_gr_site, summary, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return summary
 
 
@@ -218,6 +303,18 @@ def summarize_chat(chat_id: str, llm: BaseChatModel, force: bool = False) -> str
     with _engine().begin() as conn:
         conn.execute(chat_meta.update().where(chat_meta.c.id == chat_id)
                      .values(summary=summary, summary_messages=row["n_messages"]))
+    # LINEAJE: runtime guardrail checks `summary` as it flows from the agent to the user interface, before it leaves the application (in summarize_chat).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `summary` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:8c03cb68ea76f3fc844baa849d76b6b75eb5b9cf3b0c7541064cfb0672e3a7d4'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:8c03cb68ea76f3fc844baa849d76b6b75eb5b9cf3b0c7541064cfb0672e3a7d4', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/history.py', 'line': 221, 'function': 'summarize_chat'}, 'file': 'rag/history.py', 'line': 221, 'function': 'summarize_chat', 'agent_name': 'summarize_chat', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        summary = _gr_client.enforce(_gr_site, summary, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return summary
 
 
@@ -229,6 +326,18 @@ def summarize_each(llm: BaseChatModel, limit: int | None = None, progress=None) 
         if progress:
             progress(i, len(chats), c["title"])
         out.append({**c, "summary": summarize_chat(c["id"], llm), "has_summary": True})
+    # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in summarize_each).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:9db7aaa340c7fa3c5d534a759d52ae40a0f0e435aa1152bf7fa2d2c428811386'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:9db7aaa340c7fa3c5d534a759d52ae40a0f0e435aa1152bf7fa2d2c428811386', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/history.py', 'line': 232, 'function': 'summarize_each'}, 'file': 'rag/history.py', 'line': 232, 'function': 'summarize_each', 'agent_name': 'summarize_each', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return out
 
 
