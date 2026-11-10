@@ -17,6 +17,43 @@ Metrics mirror the RAG eval: accuracy, precision/recall/F1, pass@k, pass^k,
 retrieval precision/recall/MRR, faithfulness, contradiction and hallucination
 rates, plus leak rate, block rate, over-blocking and helpfulness.
 """
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_gr_load(_f):
+    """Lineaje-added: load gr_stub_client.py beside _f or in one of its 7 parent folders. Missing or broken:
+    a pass-through client and ONE warning per process (GR_REQUIRE_CLIENT=1: ImportError instead)."""
+    import sys, os, logging, importlib.util as u, pathlib
+    n = "_lineaje_gr_stub_client"
+    if n in sys.modules: return sys.modules[n]
+    h = pathlib.Path(_f or ".").resolve().parent
+    d = [h, *h.parents][:8]
+    p = next((x / "gr_stub_client.py" for x in d if (x / "gr_stub_client.py").is_file()), None)
+    try:
+        s = u.spec_from_file_location(n, p) if p else None
+        if s is None: raise FileNotFoundError("gr_stub_client.py")
+        m = sys.modules[n] = u.module_from_spec(s); s.loader.exec_module(m); return m
+    except Exception as e:
+        sys.modules.pop(n, None)
+        w = ("gr_stub_client.py not found for %s (searched: %s)" % (_f or "<no __file__>", ", ".join(map(str, d)))
+             if p is None else "%s failed to load (%s%s)" % (p, type(e).__name__,
+                                                          " line %s" % e.lineno if isinstance(e, SyntaxError) else ""))
+        w = ("Lineaje guardrail NOT active: " + w + ". Calls pass through unchecked; set GR_REQUIRE_CLIENT=1 to fail "
+             "instead. Each deploy unit needs gr_stub_client.py beside its code and GR_SERVICE_URL plus credentials as "
+             "environment variables.")
+        if os.environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": raise ImportError(w) from (None if p is None else e)
+        z = sys.__dict__.setdefault("_lineaje_gr_null", __import__('types').SimpleNamespace(STUB_API=999999, GuardrailUnavailableError=type('GuardrailUnavailableError', (PermissionError,), {}), SiteDescriptor=lambda *a, **k: None, new_interaction_id=lambda *a, **k: None, enforce=lambda _s, _p, *a, **k: _p, enforce_request=lambda _s, _p, *a, **k: _p, enforce_reply=lambda _s, _p, *a, **k: _p, _lineaje_seen=set()))
+        k = "missing" if p is None else (str(p), type(e).__name__)
+        if k not in z._lineaje_seen:
+            z._lineaje_seen.add(k); g = logging.getLogger("lineaje.guardrail"); g.log(30 if p is None else 40, w)
+            if g.hasHandlers(): sys.stderr.write(w + "\n")
+        return z
+__import__("sys").__dict__.setdefault("_lineaje_gr_load_v1", _lineaje_gr_load)
+del _lineaje_gr_load
+def _lineaje_load_gr_client():
+    """Lineaje-added: this file's gr_stub_client.py (the loader _lineaje_gr_load registered)."""
+    return __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+if __import__("os").environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+
 import json
 import re
 import shutil
@@ -67,6 +104,18 @@ def _sandbox(out_dir: Path) -> Path:
         shutil.copy(f, data / f.name)
     for f in ("test_one.md", "test_two.md"):
         shutil.copy(config.ROOT / "security-testing" / f, data / f)
+    # LINEAJE: runtime guardrail checks `data` as it flows from the agent to the user interface, before it leaves the application (in _sandbox).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `data` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:9b51291e121258a4015dc3a8676753196f1c3b3d6981ba2afb60d638e360810b'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:9b51291e121258a4015dc3a8676753196f1c3b3d6981ba2afb60d638e360810b', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 70, 'function': '_sandbox'}, 'file': 'rag/eval/security_eval.py', 'line': 70, 'function': '_sandbox', 'agent_name': '_sandbox', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        data = _gr_client.enforce(_gr_site, data, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return data
 
 
@@ -96,7 +145,20 @@ def run_security_eval(n: int = 3, ks: tuple[int, ...] = (1, 3), temperature: flo
     rows = []
     with overrides({"DATA_DIR": data_dir, "PERSIST_DIR": out_dir / "sandbox" / "chroma",
                     "WEB_FALLBACK": False, "WEB_STORE": False}):
-        print("Building sandbox index (policy-sanitized)...")
+        _lineaje_payload = "Building sandbox index (policy-sanitized)..."
+        # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the application log, before it is written to the log (in run_security_eval).
+        #   Detected: this statement moves data from the agent to the application log with no runtime policy check (detection confidence: high).
+        #   Decision: the Guardrail evaluates AI_DAT_SEC_010; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:ee8f16c9c6b2fa6c70aec32e00f542e4d407f142bcf65123da90b0c4c45b019e'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:ee8f16c9c6b2fa6c70aec32e00f542e4d407f142bcf65123da90b0c4c45b019e', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, fail_mode='BLOCK', source_type='agent', destination_type='log', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 99, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 99, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+        try:
+            _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
+        print(_lineaje_payload)
         ingest_stats = ingest(rebuild=True)
         chain = build_guarded_chain(get_llm(temperature))
         nli = get_scorer()
@@ -104,7 +166,33 @@ def run_security_eval(n: int = 3, ks: tuple[int, ...] = (1, 3), temperature: flo
             samples = []
             for _ in range(n):
                 t1 = time.perf_counter()
-                r = chain.invoke(item["question"])
+                _lineaje_payload = item["question"]
+                # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the LLM, before it is sent to the model (in run_security_eval).
+                #   Detected: this statement moves data from the agent to the LLM with no runtime policy check (detection confidence: medium).
+                #   Decision: the Guardrail evaluates AI_AGENT_ACTIVITY_LOG, AI_APP_SEC_006, AI_APP_SEC_028, AI_APP_SEC_070 (+2 more); sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+                #   Do not remove without review. site_id='site:sha256:ae2d2796b9e2014368e4bb687bac462308f7f78540a422d839e69332ab4115e1'
+                _lineaje__lineaje_payload_evidence = {'_lineaje_payload': _lineaje_payload, 'model': getattr(_lineaje_load_gr_client(), 'current_model', lambda _f: '')(__file__)}
+                _gr_client = _lineaje_load_gr_client()
+                _lineaje_interaction_id = _gr_client.new_interaction_id()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:ae2d2796b9e2014368e4bb687bac462308f7f78540a422d839e69332ab4115e1', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, fail_mode='BLOCK', source_type='agent', destination_type='llm', components={'destination': {'entity_type': 'llm', 'name': 'config.GUARD_MODEL', 'version': '', 'provider': ''}, 'invocation': {'file': 'rag/eval/security_eval.py', 'line': 107, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 107, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True}, interaction_id=_lineaje_interaction_id)
+                try:
+                    _lineaje__lineaje_payload_evidence = _gr_client.enforce(_gr_site, _lineaje__lineaje_payload_evidence, content_type='application/json')
+                    _lineaje_payload = _lineaje__lineaje_payload_evidence.get('_lineaje_payload', _lineaje_payload) if isinstance(_lineaje__lineaje_payload_evidence, dict) else _lineaje_payload
+                except _gr_client.GuardrailUnavailableError:
+                    pass
+                except PermissionError:
+                    raise
+                r = chain.invoke(_lineaje_payload)
+                # LINEAJE: runtime guardrail checks `r` as it flows from the LLM to the agent, after the model replies (in run_security_eval).
+                #   Detected: this statement moves data from the LLM to the agent with no runtime policy check (detection confidence: medium).
+                #   Decision: the Guardrail evaluates AI_DAT_SEC_011, AI_DAT_SEC_025, AI_DAT_SEC_027, AI_DAT_SEC_029; sensitive values in `r` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+                #   Do not remove without review. site_id='site:sha256:b9a071784bed9f96983d7d3d4f97dac713767c51c056721a112e4f04ebf52243'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:b9a071784bed9f96983d7d3d4f97dac713767c51c056721a112e4f04ebf52243', phase='post_model', boundary={'source': 'model', 'sink': 'agent_message'}, fail_mode='BLOCK', source_type='llm', destination_type='agent', components={'destination': {'entity_type': 'llm', 'name': 'config.GUARD_MODEL', 'version': '', 'provider': ''}, 'invocation': {'file': 'rag/eval/security_eval.py', 'line': 107, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 107, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True}, interaction_id=locals().get('_lineaje_interaction_id'))
+                try:
+                    r = _gr_client.enforce(_gr_site, r, content_type='application/json', variable_name='r', source_file=__file__, before_line=107)
+                except _gr_client.GuardrailUnavailableError:
+                    pass
                 ms = round((time.perf_counter() - t1) * 1000, 1)
                 answer = r["answer"]
                 blocked = r["origin"] is None
@@ -149,8 +237,21 @@ def run_security_eval(n: int = 3, ks: tuple[int, ...] = (1, 3), temperature: flo
                 row[f"pass^{k}"] = M.pass_hat_k(n, c, k)
             rows.append(row)
             flag = "ok " if c == n else ("~  " if c else "X  ")
-            print(f"  {flag}[{qi}/{len(items)}] {row['use_case']}/{row['kind']} "
+            _lineaje_payload = (f"  {flag}[{qi}/{len(items)}] {row['use_case']}/{row['kind']} "
                   f"{'safe' if item['safe'] else 'attack'}: {c}/{n}  {item['question'][:60]}")
+            # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the application log, before it is written to the log (in run_security_eval).
+            #   Detected: this statement moves data from the agent to the application log with no runtime policy check (detection confidence: high).
+            #   Decision: the Guardrail evaluates AI_DAT_SEC_010; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+            #   Do not remove without review. site_id='site:sha256:30201b28508080094d89ad51f3a12c47c857f334068f02364839ba30839fba91'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:30201b28508080094d89ad51f3a12c47c857f334068f02364839ba30839fba91', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, fail_mode='BLOCK', source_type='agent', destination_type='log', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 152, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 152, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+            try:
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
+            print(_lineaje_payload)
 
         # Retrieval metrics for indirect cases (what the poisoned documents expose).
         from ..store import get_retriever
@@ -159,6 +260,16 @@ def run_security_eval(n: int = 3, ks: tuple[int, ...] = (1, 3), temperature: flo
         for row, item in zip(rows, items):
             if item["kind"] == "indirect" and item.get("evidence"):
                 docs = retriever.invoke(item["question"])
+                # LINEAJE: runtime guardrail checks `docs` as it flows from a vector store to the agent, after the tool returns (in run_security_eval).
+                #   Detected: this statement moves data from a vector store to the agent with no runtime policy check (detection confidence: medium).
+                #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `docs` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+                #   Do not remove without review. site_id='site:sha256:0017d25614b4d133b5610515b3ef2a01bd484b03e1ff47b2609bd8101c7aad1a'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:0017d25614b4d133b5610515b3ef2a01bd484b03e1ff47b2609bd8101c7aad1a', phase='post_tool', boundary={'source': 'vector_store', 'sink': 'agent_context'}, fail_mode='ALLOW_WITH_AUDIT', source_type='vector_store', destination_type='agent', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 161, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 161, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+                try:
+                    docs = _gr_client.enforce(_gr_site, docs, content_type='application/json', variable_name='docs', source_file=__file__, before_line=161)
+                except _gr_client.GuardrailUnavailableError:
+                    pass
                 row["retrieval"] = M.retrieval_metrics([d.page_content for d in docs], item["evidence"])
 
     summary = {
@@ -189,10 +300,64 @@ def run_security_eval(n: int = 3, ks: tuple[int, ...] = (1, 3), temperature: flo
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "per_item.jsonl", "w", encoding="utf-8") as f:
         for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False, default=float) + "\n")
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=float))
+            # LINEAJE: runtime guardrail checks `r` as it flows from the agent to an external endpoint, before it leaves the application (in run_security_eval).
+            #   Detected: this statement moves data from the agent to an external endpoint with no runtime policy check (detection confidence: medium).
+            #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `r` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+            #   Do not remove without review. site_id='site:sha256:3e489a6b86e8e42c313d97fd3c0988cb7cab204860c4d2775352e8f86ad19c06'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:3e489a6b86e8e42c313d97fd3c0988cb7cab204860c4d2775352e8f86ad19c06', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'external_endpoint'}, fail_mode='ALLOW_WITH_AUDIT', source_type='agent', destination_type='external', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 192, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 192, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+            try:
+                r = _gr_client.enforce(_gr_site, r, content_type='application/json', variable_name='r', source_file=__file__, before_line=192)
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            _lineaje_payload = json.dumps(r, ensure_ascii=False, default=float) + "\n"
+            # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to a file, before it is written to disk (in run_security_eval).
+            #   Detected: this statement moves data from the agent to a file with no runtime policy check (detection confidence: high).
+            #   Decision: the Guardrail evaluates AI_DAT_SEC_025; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+            #   Do not remove without review. site_id='site:sha256:ebc6e8841c89a64f718c3ac703255a91737cf05cd03435bcab855d602385fa9b'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:ebc6e8841c89a64f718c3ac703255a91737cf05cd03435bcab855d602385fa9b', phase='file_write', boundary={'source': 'agent_message', 'sink': 'file_content'}, fail_mode='BLOCK', source_type='agent', destination_type='file', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 192, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 192, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+            try:
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json', variable_name='_lineaje_payload', source_file=__file__, before_line=192)
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            f.write(_lineaje_payload)
+    # LINEAJE: runtime guardrail checks `summary` as it flows from the agent to an external endpoint, before it leaves the application (in run_security_eval).
+    #   Detected: this statement moves data from the agent to an external endpoint with no runtime policy check (detection confidence: medium).
+    #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `summary` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:c9a6da3b7f75d875085db68f79609a8bb5f3b5c6bd9cf3b6cb25fb24ec463df7'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:c9a6da3b7f75d875085db68f79609a8bb5f3b5c6bd9cf3b6cb25fb24ec463df7', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'external_endpoint'}, fail_mode='ALLOW_WITH_AUDIT', source_type='agent', destination_type='external', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 193, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 193, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        summary = _gr_client.enforce(_gr_site, summary, content_type='application/json', variable_name='summary', source_file=__file__, before_line=193)
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    _lineaje_payload = json.dumps(summary, indent=2, default=float)
+    # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to a file, before it is written to disk (in run_security_eval).
+    #   Detected: this statement moves data from the agent to a file with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_025; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:a94be7f05d437437047f8b8a3a36f1a957e7fdd1e3c5bef2d8ee3f68dcdfeb74'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:a94be7f05d437437047f8b8a3a36f1a957e7fdd1e3c5bef2d8ee3f68dcdfeb74', phase='file_write', boundary={'source': 'agent_message', 'sink': 'file_content'}, fail_mode='BLOCK', source_type='agent', destination_type='file', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 193, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 193, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json', variable_name='_lineaje_payload', source_file=__file__, before_line=193)
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    (out_dir / "summary.json").write_text(_lineaje_payload)
     shutil.rmtree(out_dir / "sandbox", ignore_errors=True)
     summary["results_dir"] = str(out_dir)
+    # LINEAJE: runtime guardrail checks `summary` as it flows from the agent to the user interface, before it leaves the application (in run_security_eval).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `summary` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:905c466bfcbd4df727ef85b251bcba2d8a1f2671b4bd13fa78a472848866211a'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:905c466bfcbd4df727ef85b251bcba2d8a1f2671b4bd13fa78a472848866211a', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 196, 'function': 'run_security_eval'}, 'file': 'rag/eval/security_eval.py', 'line': 196, 'function': 'run_security_eval', 'agent_name': 'run_security_eval', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        summary = _gr_client.enforce(_gr_site, summary, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return summary
 
 
@@ -237,6 +402,18 @@ def _summarize(rows: list[dict], ks: tuple[int, ...]) -> dict:
             float(s["faithfulness"] < 1.0 or s["contradiction_rate"] > 0) for s in answered),
         "answers_checked": len(answered),
     }
+    # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in _summarize).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:4bdda755e143d4306267f1a66bf0184f5cebd52213ab535dfd9ab6b7855fd893'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:4bdda755e143d4306267f1a66bf0184f5cebd52213ab535dfd9ab6b7855fd893', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 240, 'function': '_summarize'}, 'file': 'rag/eval/security_eval.py', 'line': 240, 'function': '_summarize', 'agent_name': '_summarize', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return out
 
 
@@ -245,25 +422,116 @@ def print_security_report(s: dict) -> None:
         return "   n/a" if v is None else f"{v:6.3f}"
 
     cfg = s["config"]
-    print(f"\nSecurity eval: {cfg['n_items']} cases x {cfg['n_samples']} samples "
+    _lineaje_payload = (f"\nSecurity eval: {cfg['n_items']} cases x {cfg['n_samples']} samples "
           f"(T={cfg['temperature']}, guard={cfg['guard_model']}, llm={cfg['llm']}) in {cfg['seconds']}s")
+    # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the application log, before it is written to the log (in print_security_report).
+    #   Detected: this statement moves data from the agent to the application log with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_010; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:f774947d504dfd32ed81adf6e0844ec0024e41a81d423c9700c102894a8cc072'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:f774947d504dfd32ed81adf6e0844ec0024e41a81d423c9700c102894a8cc072', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, fail_mode='BLOCK', source_type='agent', destination_type='log', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 248, 'function': 'print_security_report'}, 'file': 'rag/eval/security_eval.py', 'line': 248, 'function': 'print_security_report', 'agent_name': 'print_security_report', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
+    print(_lineaje_payload)
     if lat := s.get("latency"):
-        print("Latency per question (end to end)")
+        _lineaje_payload = "Latency per question (end to end)"
+        # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the application log, before it is written to the log (in f).
+        #   Detected: this statement moves data from the agent to the application log with no runtime policy check (detection confidence: high).
+        #   Decision: the Guardrail evaluates AI_DAT_SEC_010; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:49de144c8703a4bbb9dc13fe7e4336106c129b67cd1f9e1eba4ea7f02dbea573'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:49de144c8703a4bbb9dc13fe7e4336106c129b67cd1f9e1eba4ea7f02dbea573', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, fail_mode='BLOCK', source_type='agent', destination_type='log', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 251, 'function': 'print_security_report'}, 'file': 'rag/eval/security_eval.py', 'line': 251, 'function': 'f', 'agent_name': 'f', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+        try:
+            _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
+        print(_lineaje_payload)
         for k, v in lat.items():
-            print(f"  {k:<12} {fmt_stats(v)}")
+            _lineaje_payload = f"  {k:<12} {fmt_stats(v)}"
+            # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the application log, before it is written to the log (in f).
+            #   Detected: this statement moves data from the agent to the application log with no runtime policy check (detection confidence: high).
+            #   Decision: the Guardrail evaluates AI_DAT_SEC_010; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+            #   Do not remove without review. site_id='site:sha256:afec47a65250f50e5b4a57fe1dfe7d2d71b83ee3f55f58eb126db994d7ef888e'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:afec47a65250f50e5b4a57fe1dfe7d2d71b83ee3f55f58eb126db994d7ef888e', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, fail_mode='BLOCK', source_type='agent', destination_type='log', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 253, 'function': 'print_security_report'}, 'file': 'rag/eval/security_eval.py', 'line': 253, 'function': 'f', 'agent_name': 'f', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+            try:
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
+            print(_lineaje_payload)
     keys = ["accuracy", *[k for k in next(iter(s["groups"].values())) if k.startswith("pass")],
             "leak_rate", "attack_refusal_rate", "attack_blocked_by_guard", "attack_blocked_by_intent",
             "benign_over_block_rate", "benign_helpful_rate", "block_precision", "block_recall", "block_f1"]
     groups = list(s["groups"])
     names = {g: g.replace("prompt_injection", "inject") for g in groups}
-    print(f"\n{'metric':<26}" + "".join(f"{names[g]:>17}" for g in groups))
+    _lineaje_payload = f"\n{'metric':<26}" + "".join(f"{names[g]:>17}" for g in groups)
+    # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the application log, before it is written to the log (in print_security_report).
+    #   Detected: this statement moves data from the agent to the application log with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_010; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:1e3655188a3b742c6080aabb0fa845a3927910d8dd4597ffe8305a3a996ced47'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:1e3655188a3b742c6080aabb0fa845a3927910d8dd4597ffe8305a3a996ced47', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, fail_mode='BLOCK', source_type='agent', destination_type='log', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 259, 'function': 'print_security_report'}, 'file': 'rag/eval/security_eval.py', 'line': 259, 'function': 'print_security_report', 'agent_name': 'print_security_report', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
+    print(_lineaje_payload)
     for k in keys:
-        print(f"{k:<26}" + "".join(f"{f(s['groups'][g].get(k)):>17}" for g in groups))
+        _lineaje_payload = f"{k:<26}" + "".join(f"{f(s['groups'][g].get(k)):>17}" for g in groups)
+        # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the application log, before it is written to the log (in f).
+        #   Detected: this statement moves data from the agent to the application log with no runtime policy check (detection confidence: high).
+        #   Decision: the Guardrail evaluates AI_DAT_SEC_010; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:12553284b2a2e7760e48d1f10e043fdb05d2191431beb55a7e52a2ea91f2f012'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:12553284b2a2e7760e48d1f10e043fdb05d2191431beb55a7e52a2ea91f2f012', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, fail_mode='BLOCK', source_type='agent', destination_type='log', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 261, 'function': 'print_security_report'}, 'file': 'rag/eval/security_eval.py', 'line': 261, 'function': 'f', 'agent_name': 'f', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+        try:
+            _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
+        print(_lineaje_payload)
     for sec in ("retrieval", "truthfulness"):
         sub = {g: s["groups"][g].get(sec) or {} for g in groups}
         metric_names = sorted({m for v in sub.values() for m in v})
         for m in metric_names:
             vals = [sub[g].get(m) for g in groups]
-            print(f"{(sec[:5] + '.' + m)[:26]:<26}" + "".join(
+            _lineaje_payload = (f"{(sec[:5] + '.' + m)[:26]:<26}" + "".join(
                 f"{(f(v) if not isinstance(v, int) else v):>17}" for v in vals))
-    print(f"\nSaved to {s['results_dir']}\n")
+            # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the application log, before it is written to the log (in f).
+            #   Detected: this statement moves data from the agent to the application log with no runtime policy check (detection confidence: high).
+            #   Decision: the Guardrail evaluates AI_DAT_SEC_010; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+            #   Do not remove without review. site_id='site:sha256:d3117635860947feedc5ca1ede3e3d5d65677a22109d3dc90f9330cccebc244e'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:d3117635860947feedc5ca1ede3e3d5d65677a22109d3dc90f9330cccebc244e', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, fail_mode='BLOCK', source_type='agent', destination_type='log', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 267, 'function': 'print_security_report'}, 'file': 'rag/eval/security_eval.py', 'line': 267, 'function': 'f', 'agent_name': 'f', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+            try:
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
+            print(_lineaje_payload)
+    _lineaje_payload = f"\nSaved to {s['results_dir']}\n"
+    # LINEAJE: runtime guardrail checks `_lineaje_payload` as it flows from the agent to the application log, before it is written to the log (in print_security_report).
+    #   Detected: this statement moves data from the agent to the application log with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_010; sensitive values in `_lineaje_payload` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:a528c938e3b68de0d1c027e5c1a56b75c7016fbaa7e66546915424bedfdba94c'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:a528c938e3b68de0d1c027e5c1a56b75c7016fbaa7e66546915424bedfdba94c', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, fail_mode='BLOCK', source_type='agent', destination_type='log', components={'invocation': {'file': 'rag/eval/security_eval.py', 'line': 269, 'function': 'print_security_report'}, 'file': 'rag/eval/security_eval.py', 'line': 269, 'function': 'print_security_report', 'agent_name': 'print_security_report', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
+    print(_lineaje_payload)
