@@ -21,6 +21,43 @@ summarization   summarize_session    rolling summary of turns older than the rec
 eval            evaluate_turn        online quality signals for one turn
 memory          save_turn            persist the exchange (PII-redacted) and session state
 """
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_gr_load(_f):
+    """Lineaje-added: load gr_stub_client.py beside _f or in one of its 7 parent folders. Missing or broken:
+    a pass-through client and ONE warning per process (GR_REQUIRE_CLIENT=1: ImportError instead)."""
+    import sys, os, logging, importlib.util as u, pathlib
+    n = "_lineaje_gr_stub_client"
+    if n in sys.modules: return sys.modules[n]
+    h = pathlib.Path(_f or ".").resolve().parent
+    d = [h, *h.parents][:8]
+    p = next((x / "gr_stub_client.py" for x in d if (x / "gr_stub_client.py").is_file()), None)
+    try:
+        s = u.spec_from_file_location(n, p) if p else None
+        if s is None: raise FileNotFoundError("gr_stub_client.py")
+        m = sys.modules[n] = u.module_from_spec(s); s.loader.exec_module(m); return m
+    except Exception as e:
+        sys.modules.pop(n, None)
+        w = ("gr_stub_client.py not found for %s (searched: %s)" % (_f or "<no __file__>", ", ".join(map(str, d)))
+             if p is None else "%s failed to load (%s%s)" % (p, type(e).__name__,
+                                                          " line %s" % e.lineno if isinstance(e, SyntaxError) else ""))
+        w = ("Lineaje guardrail NOT active: " + w + ". Calls pass through unchecked; set GR_REQUIRE_CLIENT=1 to fail "
+             "instead. Each deploy unit needs gr_stub_client.py beside its code and GR_SERVICE_URL plus credentials as "
+             "environment variables.")
+        if os.environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": raise ImportError(w) from (None if p is None else e)
+        z = sys.__dict__.setdefault("_lineaje_gr_null", __import__('types').SimpleNamespace(STUB_API=999999, GuardrailUnavailableError=type('GuardrailUnavailableError', (PermissionError,), {}), SiteDescriptor=lambda *a, **k: None, new_interaction_id=lambda *a, **k: None, enforce=lambda _s, _p, *a, **k: _p, enforce_request=lambda _s, _p, *a, **k: _p, enforce_reply=lambda _s, _p, *a, **k: _p, _lineaje_seen=set()))
+        k = "missing" if p is None else (str(p), type(e).__name__)
+        if k not in z._lineaje_seen:
+            z._lineaje_seen.add(k); g = logging.getLogger("lineaje.guardrail"); g.log(30 if p is None else 40, w)
+            if g.hasHandlers(): sys.stderr.write(w + "\n")
+        return z
+__import__("sys").__dict__.setdefault("_lineaje_gr_load_v1", _lineaje_gr_load)
+del _lineaje_gr_load
+def _lineaje_load_gr_client():
+    """Lineaje-added: this file's gr_stub_client.py (the loader _lineaje_gr_load registered)."""
+    return __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+if __import__("os").environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+
 from functools import lru_cache
 
 from langchain_core.documents import Document
@@ -121,6 +158,12 @@ def retrieve(question: str, interests: list[dict] | None = None) -> list[Documen
     user's interests, reranked with personalized PageRank over the knowledge graph."""
     from .personalize import PersonalizedRetriever
 
+    try:
+        _lineaje_obs = _lineaje_load_gr_client()
+        _lineaje_obs_site = _lineaje_obs.SiteDescriptor(site_id='site:sha256:6e07746434ee442157368aa171205745d157971c5df2f7fa8978d290d214f3f5', phase='', boundary={}, fail_mode='ALLOW', source_type='vector_store', destination_type='agent', components={'file': 'rag/agent/tools.py', 'line': 124, 'function': 'retrieve', 'agent_name': 'retrieve', 'agent_name_source': 'inferred_from_function', 'call_target': 'PersonalizedRetriever(interests=interests or [], k=config.TOP_K, graph_k=config.', 'not_on_graph': True}, observe_only=True)
+        _lineaje_obs.enforce(_lineaje_obs_site, {'activity': 'rag_retrieve'}, content_type='application/json')
+    except Exception as _lineaje_obs_err:
+        [__import__('sys').__dict__.setdefault('_lineaje_gr_logged', set()).add(_k) or __import__('logging').getLogger('lineaje.guardrail').warning('Lineaje guardrail: an observe-only report failed (%s); later failures of this kind are not logged', _k[1]) for _k in [('observe', type(_lineaje_obs_err).__name__)] if _k not in __import__('sys').__dict__.setdefault('_lineaje_gr_logged', set())]
     return PersonalizedRetriever(interests=interests or [], k=config.TOP_K,
                                  graph_k=config.GRAPH_K).invoke(question)
 
@@ -172,10 +215,30 @@ def summarize_session(messages: list[dict], previous: str | None = None) -> str 
 
     older = messages[:-2 * config.HISTORY_TURNS]
     if len(older) < 2:
+        # LINEAJE: runtime guardrail checks `previous` as it flows from a tool to the agent, after the tool returns (in summarize_session).
+        #   Detected: this statement moves data from a tool to the agent with no runtime policy check (detection confidence: high).
+        #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `previous` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:1fe5f480a437c34980d9765a9af0a7f8ffae40cef37dc7280a30b0353a1747bc'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:1fe5f480a437c34980d9765a9af0a7f8ffae40cef37dc7280a30b0353a1747bc', phase='post_tool', boundary={'source': 'tool_result', 'sink': 'agent_message'}, fail_mode='ALLOW_WITH_AUDIT', source_type='tool', destination_type='agent', components={'invocation': {'file': 'rag/agent/tools.py', 'line': 175, 'function': 'summarize_session'}, 'file': 'rag/agent/tools.py', 'line': 175, 'function': 'summarize_session', 'agent_name': 'summarize_session', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+        try:
+            previous = _gr_client.enforce(_gr_site, previous, content_type='application/json', variable_name='previous', source_file=__file__, before_line=175)
+        except _gr_client.GuardrailUnavailableError:
+            pass
         return previous
     try:
         return summarize_messages(older, _ollama())
     except Exception:  # Ollama unavailable: keep the previous summary
+        # LINEAJE: runtime guardrail checks `previous` as it flows from a tool to the agent, after the tool returns (in summarize_session).
+        #   Detected: this statement moves data from a tool to the agent with no runtime policy check (detection confidence: high).
+        #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `previous` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+        #   Do not remove without review. site_id='site:sha256:9172db6ae53d52ce1f114176ab018e9ce42474b30a7672108e06b769c5f30dc5'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:9172db6ae53d52ce1f114176ab018e9ce42474b30a7672108e06b769c5f30dc5', phase='post_tool', boundary={'source': 'tool_result', 'sink': 'agent_message'}, fail_mode='ALLOW_WITH_AUDIT', source_type='tool', destination_type='agent', components={'invocation': {'file': 'rag/agent/tools.py', 'line': 179, 'function': 'summarize_session'}, 'file': 'rag/agent/tools.py', 'line': 179, 'function': 'summarize_session', 'agent_name': 'summarize_session', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+        try:
+            previous = _gr_client.enforce(_gr_site, previous, content_type='application/json', variable_name='previous', source_file=__file__, before_line=179)
+        except _gr_client.GuardrailUnavailableError:
+            pass
         return previous
 
 
@@ -207,6 +270,16 @@ def evaluate_turn(question: str, answer: str, docs: list[Document],
         from ..eval.truthfulness import get_scorer
 
         out["faithfulness"] = get_scorer().faithfulness(answer, ctx)["faithfulness"]
+    # LINEAJE: runtime guardrail checks `out` as it flows from a tool to the agent, after the tool returns (in evaluate_turn).
+    #   Detected: this statement moves data from a tool to the agent with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates the policies enabled for this boundary; sensitive values in `out` are masked in place; a policy violation is logged and the call continues (fail_mode=ALLOW_WITH_AUDIT). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:b37cba334ef6e38e558234efaddec597385d735c0fd45db1fde40a6b990a8242'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:b37cba334ef6e38e558234efaddec597385d735c0fd45db1fde40a6b990a8242', phase='post_tool', boundary={'source': 'tool_result', 'sink': 'agent_message'}, fail_mode='ALLOW_WITH_AUDIT', source_type='tool', destination_type='agent', components={'invocation': {'file': 'rag/agent/tools.py', 'line': 210, 'function': 'evaluate_turn'}, 'file': 'rag/agent/tools.py', 'line': 210, 'function': 'evaluate_turn', 'agent_name': 'evaluate_turn', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        out = _gr_client.enforce(_gr_site, out, content_type='application/json', variable_name='out', source_file=__file__, before_line=210)
+    except _gr_client.GuardrailUnavailableError:
+        pass
     return out
 
 
