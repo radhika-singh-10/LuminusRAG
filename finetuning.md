@@ -1,6 +1,6 @@
 # Fine-tuning Qwen on Apple Silicon
 
-This guide uses MLX-LM LoRA on Apple Silicon and then runs the repository's RAG evaluation against the adapter. The current adapter, `finetune/adapters/qwen25-1.5b-v1`, was trained for 300 iterations on a **single training example**. Treat it as an end-to-end smoke run, not a useful domain fine-tune; collect a varied dataset and retrain before drawing quality conclusions.
+This guide uses MLX-LM LoRA on Apple Silicon and then runs the repository's RAG evaluation against the adapter. The existing adapter, `finetune/adapters/qwen25-1.5b-v1`, was trained for 300 iterations on a **single example**. Treat it as an end-to-end smoke run, not a useful domain fine-tune. A 45-example starter set is now available; it is still small and synthetic, so gather more reviewed examples before drawing quality conclusions.
 
 ## 1. Check the machine
 
@@ -40,7 +40,15 @@ finetune/data/
 └── test.jsonl
 ```
 
-The existing `train.jsonl` is just one smoke example. Add varied questions and contexts drawn from the application's own knowledge domain. Keep evaluation examples separate: do not copy `eval/dataset.jsonl` into training. The repository evaluation dataset is held out for measuring the complete RAG pipeline.
+Generate the current curated seed set with:
+
+```bash
+python finetune/build_dataset.py
+```
+
+It creates 45 training, 8 validation, and 10 test examples covering grounded answers, citations, refusals, untrusted instructions, and concepts in the checked-in guides. The script checks for duplicate questions and exact question overlap with `eval/dataset.jsonl`. Read [finetune/data/README.md](finetune/data/README.md) for the set's limits. These examples are synthetic; review them and add varied examples from held-out documents before treating results as representative.
+
+Keep `eval/dataset.jsonl` out of all SFT splits. It evaluates the full RAG pipeline, while `valid.jsonl` and `test.jsonl` are for adapter training diagnostics.
 
 Example record (one JSON object per line):
 
@@ -66,7 +74,7 @@ mlx_lm.lora \
   --adapter-path finetune/adapters/qwen25-1.5b-smoke
 ```
 
-For a real run, use your larger curated dataset and choose the iteration count from validation results. The current 300-iteration adapter was created with:
+For an initial SFT run, use a new adapter directory so the existing smoke adapter is preserved. Choose the iteration count from validation results:
 
 ```bash
 mlx_lm.lora \
@@ -77,7 +85,7 @@ mlx_lm.lora \
   --batch-size 1 \
   --num-layers 8 \
   --mask-prompt \
-  --adapter-path finetune/adapters/qwen25-1.5b-v1
+  --adapter-path finetune/adapters/qwen25-1.5b-sft-v2
 ```
 
 Test the adapter in MLX-LM directly:
@@ -85,13 +93,13 @@ Test the adapter in MLX-LM directly:
 ```bash
 mlx_lm.lora \
   --model finetune/models/qwen2.5-1.5b-instruct \
-  --adapter-path finetune/adapters/qwen25-1.5b-v1 \
+  --adapter-path finetune/adapters/qwen25-1.5b-sft-v2 \
   --data finetune/data \
   --test
 
 mlx_lm.chat \
   --model finetune/models/qwen2.5-1.5b-instruct \
-  --adapter-path finetune/adapters/qwen25-1.5b-v1
+  --adapter-path finetune/adapters/qwen25-1.5b-sft-v2
 ```
 
 ## 5. Run the project evaluation against the adapter
