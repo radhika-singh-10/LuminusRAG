@@ -22,6 +22,43 @@ line scanner. Brace languages (JavaScript, TypeScript, Java, Go, Rust, C,
 C++, C#, Kotlin, Swift, Scala, PHP) use a scanner that tracks brace depth
 while skipping strings and comments.
 """
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_gr_load(_f):
+    """Lineaje-added: load gr_stub_client.py beside _f or in one of its 7 parent folders. Missing or broken:
+    a pass-through client and ONE warning per process (GR_REQUIRE_CLIENT=1: ImportError instead)."""
+    import sys, os, logging, importlib.util as u, pathlib
+    n = "_lineaje_gr_stub_client"
+    if n in sys.modules: return sys.modules[n]
+    h = pathlib.Path(_f or ".").resolve().parent
+    d = [h, *h.parents][:8]
+    p = next((x / "gr_stub_client.py" for x in d if (x / "gr_stub_client.py").is_file()), None)
+    try:
+        s = u.spec_from_file_location(n, p) if p else None
+        if s is None: raise FileNotFoundError("gr_stub_client.py")
+        m = sys.modules[n] = u.module_from_spec(s); s.loader.exec_module(m); return m
+    except Exception as e:
+        sys.modules.pop(n, None)
+        w = ("gr_stub_client.py not found for %s (searched: %s)" % (_f or "<no __file__>", ", ".join(map(str, d)))
+             if p is None else "%s failed to load (%s%s)" % (p, type(e).__name__,
+                                                          " line %s" % e.lineno if isinstance(e, SyntaxError) else ""))
+        w = ("Lineaje guardrail NOT active: " + w + ". Calls pass through unchecked; set GR_REQUIRE_CLIENT=1 to fail "
+             "instead. Each deploy unit needs gr_stub_client.py beside its code and GR_SERVICE_URL plus credentials as "
+             "environment variables.")
+        if os.environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": raise ImportError(w) from (None if p is None else e)
+        z = sys.__dict__.setdefault("_lineaje_gr_null", __import__('types').SimpleNamespace(STUB_API=999999, GuardrailUnavailableError=type('GuardrailUnavailableError', (PermissionError,), {}), SiteDescriptor=lambda *a, **k: None, new_interaction_id=lambda *a, **k: None, enforce=lambda _s, _p, *a, **k: _p, enforce_request=lambda _s, _p, *a, **k: _p, enforce_reply=lambda _s, _p, *a, **k: _p, _lineaje_seen=set()))
+        k = "missing" if p is None else (str(p), type(e).__name__)
+        if k not in z._lineaje_seen:
+            z._lineaje_seen.add(k); g = logging.getLogger("lineaje.guardrail"); g.log(30 if p is None else 40, w)
+            if g.hasHandlers(): sys.stderr.write(w + "\n")
+        return z
+__import__("sys").__dict__.setdefault("_lineaje_gr_load_v1", _lineaje_gr_load)
+del _lineaje_gr_load
+def _lineaje_load_gr_client():
+    """Lineaje-added: this file's gr_stub_client.py (the loader _lineaje_gr_load registered)."""
+    return __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+if __import__("os").environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+
 import ast
 import re
 from dataclasses import dataclass, field
@@ -76,6 +113,18 @@ def _partition(starts: list[tuple[int, str, str]], first: int, last: int) -> lis
         start = first if i == 0 else s
         end = starts[i + 1][0] - 1 if i + 1 < len(starts) else last
         units.append(Unit(kind, name, start, end))
+    # LINEAJE: runtime guardrail checks `units` as it flows from the agent to the user interface, before it leaves the application (in _partition).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `units` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:62dc7d8e6ecc05dc0931c4e8339a45783d0268cb7082f01f63d98c4bb951762d'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:62dc7d8e6ecc05dc0931c4e8339a45783d0268cb7082f01f63d98c4bb951762d', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 79, 'function': '_partition'}, 'file': 'rag/code_chunking.py', 'line': 79, 'function': '_partition', 'agent_name': '_partition', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        units = _gr_client.enforce(_gr_site, units, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return units
 
 
@@ -90,6 +139,18 @@ def _merge_runs(units: list[Unit], lines: list[str], size: int) -> list[Unit]:
             prev.end = u.end
         else:
             out.append(u)
+    # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in _merge_runs).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:98039c56ced38b47bfc4b292925bf5131707cd62f5f9d596c85fe23335712ee5'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:98039c56ced38b47bfc4b292925bf5131707cd62f5f9d596c85fe23335712ee5', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 93, 'function': '_merge_runs'}, 'file': 'rag/code_chunking.py', 'line': 93, 'function': '_merge_runs', 'agent_name': '_merge_runs', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return out
 
 
@@ -98,6 +159,18 @@ def _attach_leading(lines: list[str], start: int, floor: int, comment: re.Patter
     s = start
     while s - 1 >= floor and lines[s - 1].strip() and comment.match(lines[s - 1]):
         s -= 1
+    # LINEAJE: runtime guardrail checks `s` as it flows from the agent to the user interface, before it leaves the application (in _attach_leading).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `s` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:125379747fe178a485eeb4e897e50d05780ef378e3eda7c9f5aeb97370d7386a'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:125379747fe178a485eeb4e897e50d05780ef378e3eda7c9f5aeb97370d7386a', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 101, 'function': '_attach_leading'}, 'file': 'rag/code_chunking.py', 'line': 101, 'function': '_attach_leading', 'agent_name': '_attach_leading', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        s = _gr_client.enforce(_gr_site, s, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return s
 
 
@@ -130,6 +203,18 @@ def _py_starts(nodes, lines: list[str], floor: int) -> list[tuple[int, str, str]
         floor = n.end_lineno
         kind, name = _py_kind(n)
         starts.append((first, kind, name))
+    # LINEAJE: runtime guardrail checks `starts` as it flows from the agent to the user interface, before it leaves the application (in _py_starts).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `starts` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:f97331225db07bb095fb046fd990ba8914ff388f347a99b20c61719693c5b00e'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:f97331225db07bb095fb046fd990ba8914ff388f347a99b20c61719693c5b00e', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 133, 'function': '_py_starts'}, 'file': 'rag/code_chunking.py', 'line': 133, 'function': '_py_starts', 'agent_name': '_py_starts', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        starts = _gr_client.enforce(_gr_site, starts, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return starts
 
 
@@ -151,6 +236,18 @@ def _python_units(source: str, lines: list[str], size: int) -> list[Unit] | None
             out += _python_function_split(node, u, lines)
         else:
             out.append(u)
+    # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in _python_units).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:f0136a02e3b28e76a6468e22e6e2e2d1369fdc6c8d510e9f12097973dde8791d'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:f0136a02e3b28e76a6468e22e6e2e2d1369fdc6c8d510e9f12097973dde8791d', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 154, 'function': '_python_units'}, 'file': 'rag/code_chunking.py', 'line': 154, 'function': '_python_units', 'agent_name': '_python_units', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return out
 
 
@@ -184,6 +281,18 @@ def _python_function_split(node, u: Unit, lines: list[str]) -> list[Unit]:
     for i, p in enumerate(parts, 1):
         p.part = f"part {i}/{len(parts)}" if len(parts) > 1 else ""
         p.parent = u.parent
+    # LINEAJE: runtime guardrail checks `parts` as it flows from the agent to the user interface, before it leaves the application (in _python_function_split).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `parts` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:4ea51241f15055a70458f6b65531d69e32b9df659125b068db2b28df04d754db'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:4ea51241f15055a70458f6b65531d69e32b9df659125b068db2b28df04d754db', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 187, 'function': '_python_function_split'}, 'file': 'rag/code_chunking.py', 'line': 187, 'function': '_python_function_split', 'agent_name': '_python_function_split', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        parts = _gr_client.enforce(_gr_site, parts, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return parts
 
 
@@ -246,6 +355,18 @@ def _depths(source: str) -> list[int]:
         elif ch == "}":
             depth = max(0, depth - 1)
         i += 1
+    # LINEAJE: runtime guardrail checks `depths` as it flows from the agent to the user interface, before it leaves the application (in _depths).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `depths` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:ead0898cece6d27105202c34584b30bb01840acfbf18337282f877b2c2e08fde'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:ead0898cece6d27105202c34584b30bb01840acfbf18337282f877b2c2e08fde', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 249, 'function': '_depths'}, 'file': 'rag/code_chunking.py', 'line': 249, 'function': '_depths', 'agent_name': '_depths', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        depths = _gr_client.enforce(_gr_site, depths, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return depths
 
 
@@ -294,6 +415,18 @@ def _brace_items(lines: list[str], depths: list[int], level: int, lo: int, hi: i
         while j <= hi and lines[j].strip() in ("}", "};", "})", "});", "},"):
             j += 1
         i = max(j, i + 1)
+    # LINEAJE: runtime guardrail checks `starts` as it flows from the agent to the user interface, before it leaves the application (in _brace_items).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `starts` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:09dd4b56d987ac5b8d3336190144fb9c0b6fe9d5198ab3db24ef1f8a8dc46ebf'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:09dd4b56d987ac5b8d3336190144fb9c0b6fe9d5198ab3db24ef1f8a8dc46ebf', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 297, 'function': '_brace_items'}, 'file': 'rag/code_chunking.py', 'line': 297, 'function': '_brace_items', 'agent_name': '_brace_items', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        starts = _gr_client.enforce(_gr_site, starts, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return starts
 
 
@@ -319,6 +452,18 @@ def _brace_units(lines: list[str], size: int) -> list[Unit]:
                 out += parts
                 continue
         out.append(u)
+    # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in _brace_units).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:30a9316e659702417b67b789c092705ac2a136979f613675a6254c18e3e60c5c'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:30a9316e659702417b67b789c092705ac2a136979f613675a6254c18e3e60c5c', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 322, 'function': '_brace_units'}, 'file': 'rag/code_chunking.py', 'line': 322, 'function': '_brace_units', 'agent_name': '_brace_units', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return out
 
 
@@ -336,6 +481,18 @@ def code_units(source: str, language: str, size: int | None = None) -> list[tupl
         text = _lines_text(lines, u)
         if text.strip():
             out.append((u, text))
+    # LINEAJE: runtime guardrail checks `out` as it flows from the agent to the user interface, before it leaves the application (in code_units).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `out` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:3593995bef58d76a103134b176451d9097539685be86fde8c21b01c9db01bca7'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:3593995bef58d76a103134b176451d9097539685be86fde8c21b01c9db01bca7', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'rag/code_chunking.py', 'line': 339, 'function': 'code_units'}, 'file': 'rag/code_chunking.py', 'line': 339, 'function': 'code_units', 'agent_name': 'code_units', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        out = _gr_client.enforce(_gr_site, out, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return out
 
 
