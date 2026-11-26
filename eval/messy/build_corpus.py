@@ -19,6 +19,43 @@ Every evidence string is checked to occur in exactly one section, so
 retrieval metrics are unambiguous. The facts are invented; this corpus exists
 only to stress retrieval and reranking.
 """
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_gr_load(_f):
+    """Lineaje-added: load gr_stub_client.py beside _f or in one of its 7 parent folders. Missing or broken:
+    a pass-through client and ONE warning per process (GR_REQUIRE_CLIENT=1: ImportError instead)."""
+    import sys, os, logging, importlib.util as u, pathlib
+    n = "_lineaje_gr_stub_client"
+    if n in sys.modules: return sys.modules[n]
+    h = pathlib.Path(_f or ".").resolve().parent
+    d = [h, *h.parents][:8]
+    p = next((x / "gr_stub_client.py" for x in d if (x / "gr_stub_client.py").is_file()), None)
+    try:
+        s = u.spec_from_file_location(n, p) if p else None
+        if s is None: raise FileNotFoundError("gr_stub_client.py")
+        m = sys.modules[n] = u.module_from_spec(s); s.loader.exec_module(m); return m
+    except Exception as e:
+        sys.modules.pop(n, None)
+        w = ("gr_stub_client.py not found for %s (searched: %s)" % (_f or "<no __file__>", ", ".join(map(str, d)))
+             if p is None else "%s failed to load (%s%s)" % (p, type(e).__name__,
+                                                          " line %s" % e.lineno if isinstance(e, SyntaxError) else ""))
+        w = ("Lineaje guardrail NOT active: " + w + ". Calls pass through unchecked; set GR_REQUIRE_CLIENT=1 to fail "
+             "instead. Each deploy unit needs gr_stub_client.py beside its code and GR_SERVICE_URL plus credentials as "
+             "environment variables.")
+        if os.environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": raise ImportError(w) from (None if p is None else e)
+        z = sys.__dict__.setdefault("_lineaje_gr_null", __import__('types').SimpleNamespace(STUB_API=999999, GuardrailUnavailableError=type('GuardrailUnavailableError', (PermissionError,), {}), SiteDescriptor=lambda *a, **k: None, new_interaction_id=lambda *a, **k: None, enforce=lambda _s, _p, *a, **k: _p, enforce_request=lambda _s, _p, *a, **k: _p, enforce_reply=lambda _s, _p, *a, **k: _p, _lineaje_seen=set()))
+        k = "missing" if p is None else (str(p), type(e).__name__)
+        if k not in z._lineaje_seen:
+            z._lineaje_seen.add(k); g = logging.getLogger("lineaje.guardrail"); g.log(30 if p is None else 40, w)
+            if g.hasHandlers(): sys.stderr.write(w + "\n")
+        return z
+__import__("sys").__dict__.setdefault("_lineaje_gr_load_v1", _lineaje_gr_load)
+del _lineaje_gr_load
+def _lineaje_load_gr_client():
+    """Lineaje-added: this file's gr_stub_client.py (the loader _lineaje_gr_load registered)."""
+    return __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+if __import__("os").environ.get("GR_REQUIRE_CLIENT", "").strip() == "1": __import__("sys").__dict__["_lineaje_gr_load_v1"](globals().get("__file__"))
+
 import json
 import random
 import re
@@ -68,6 +105,18 @@ def ocr_noise(text: str) -> str:
     for w in rng.sample(sorted(words), min(2, len(words))):
         cut = len(w) // 2
         text = text.replace(w, f"{w[:cut]}-\n{w[cut:]}", 1)
+    # LINEAJE: runtime guardrail checks `text` as it flows from the agent to the user interface, before it leaves the application (in ocr_noise).
+    #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+    #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `text` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+    #   Do not remove without review. site_id='site:sha256:98e4232eca8471deb27c7b0913c4c8adf9ac287a3c7e7e0ca831c5e3c0002e51'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:98e4232eca8471deb27c7b0913c4c8adf9ac287a3c7e7e0ca831c5e3c0002e51', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'eval/messy/build_corpus.py', 'line': 71, 'function': 'ocr_noise'}, 'file': 'eval/messy/build_corpus.py', 'line': 71, 'function': 'ocr_noise', 'agent_name': 'ocr_noise', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+    try:
+        text = _gr_client.enforce(_gr_site, text, content_type='text/plain')
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        pass
     return text
 
 
@@ -103,6 +152,18 @@ def cfg_values():
              rng.choice([40, 64, 80, 96, 128, 150, 180, 200, 256]), rng.choice([1, 2, 3, 4, 6, 8]))
         if v not in used_cfg:
             used_cfg.add(v)
+            # LINEAJE: runtime guardrail checks `v` as it flows from the agent to the user interface, before it leaves the application (in cfg_values).
+            #   Detected: this statement moves data from the agent to the user interface with no runtime policy check (detection confidence: high).
+            #   Decision: the Guardrail evaluates AI_DAT_SEC_012; sensitive values in `v` are masked in place; a policy violation stops the call (fail_mode=BLOCK). If the Guardrail is unreachable, the call continues unchanged.
+            #   Do not remove without review. site_id='site:sha256:124cbc0f6aea5a918476a1d024c6ddf450955c8b97d049d2dbe2236b1876770c'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:124cbc0f6aea5a918476a1d024c6ddf450955c8b97d049d2dbe2236b1876770c', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, fail_mode='BLOCK', source_type='agent', destination_type='user_interface', components={'invocation': {'file': 'eval/messy/build_corpus.py', 'line': 106, 'function': 'cfg_values'}, 'file': 'eval/messy/build_corpus.py', 'line': 106, 'function': 'cfg_values', 'agent_name': 'cfg_values', 'agent_name_source': 'inferred_from_function', 'not_on_graph': True})
+            try:
+                v = _gr_client.enforce(_gr_site, v, content_type='text/plain')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             return v
 
 
